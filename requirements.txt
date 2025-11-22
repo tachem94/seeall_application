@@ -1,0 +1,28 @@
+# SEE ALL AVKN - Devis & Factures Application Requirements
+# Installation: pip install -r requirements.txt
+
+# PDF generation
+reportlab>=4.0.0
+
+# Word document generation
+python-docx>=1.1.0
+
+# GUI framework (usually included with Python)
+# tkinter - included with Python standard library
+
+# Database (included with Python)
+# sqlite3 - included with Python standard library
+
+# Standard library modules used:
+# - datetime
+# - os
+# - re
+# - dataclasses
+# - typing
+# - uuid
+# - tkinter
+# - sqlite3
+
+# Optional dependencies for enhanced functionality
+# openpyxl>=3.1.0  # For Excel export if needed later
+# Pillow>=10.0.0   # For image handling in documents if needed later
