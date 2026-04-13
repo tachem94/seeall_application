@@ -94,10 +94,19 @@ python seeall_devis_factures.py
 ## 📊 Structure des Données
 
 ### Numérotation Automatique
-- **Devis** : `SA.<NOM_CLIENT>.MMYYYY001`
-- **Factures** : `FA.<NOM_CLIENT>.MMYYYY001`
+- **Devis** : `SA.<NOM_CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>`
+- **Factures** : `FA.<NOM_CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>`
+- Les segments `SITE` et `VILLE` sont optionnels : inclus uniquement s'ils sont renseignés dans le formulaire
 - Auto-incrémentation par client et par mois
-- Exemple : `SA.STAUBINSURMER.112025001`
+
+Exemples selon les données saisies :
+
+| SITE | VILLE | Numéro généré |
+|------|-------|---------------|
+| ✅ | ✅ | `SA.STAUBINSURMER.SITE42.Paris.042026001` |
+| ❌ | ✅ | `SA.STAUBINSURMER.Paris.042026001` |
+| ✅ | ❌ | `SA.STAUBINSURMER.SITE42.042026001` |
+| ❌ | ❌ | `SA.STAUBINSURMER.042026001` |
 
 ### Base de Données
 - **clients** : Informations clients
