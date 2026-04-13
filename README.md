@@ -11,7 +11,7 @@ Application complète de gestion des devis et factures pour la société SEE ALL
 - Interface intuitive de gestion
 
 ### 📄 Gestion des Devis
-- Création de devis avec numérotation automatique : `SA.<CLIENT>.MMYYYY001`
+- Création de devis avec numérotation automatique : `SA.<NOM_CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>`
 - Ajout d'articles avec description et prix HT
 - Calcul automatique des totaux (HT, TVA 20%, TTC)
 - Sauvegarde en base de données SQLite
@@ -19,7 +19,7 @@ Application complète de gestion des devis et factures pour la société SEE ALL
 
 ### 🧾 Gestion des Factures
 - Conversion automatique devis → facture
-- Numérotation facture : `FA.<CLIENT>.MMYYYY001`
+- Numérotation facture : `FA.<NOM_CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>`
 - Gestion du numéro de bon de commande
 - Export PDF et Word avec informations bancaires
 - Suivi des factures émises
