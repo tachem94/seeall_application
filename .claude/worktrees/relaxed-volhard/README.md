@@ -11,7 +11,7 @@ Application complète de gestion des devis et factures pour la société SEE ALL
 - Interface intuitive de gestion
 
 ### 📄 Gestion des Devis
-- Création de devis avec numérotation automatique : `SA.<CLIENT>.MMYYYY001`
+- Création de devis avec numérotation automatique : `SA.<CLIENT>.<SITE>.<VILLE>.MMYYYY001`
 - Ajout d'articles avec description et prix HT
 - Calcul automatique des totaux (HT, TVA 20%, TTC)
 - Sauvegarde en base de données SQLite
@@ -94,10 +94,10 @@ python seeall_devis_factures.py
 ## 📊 Structure des Données
 
 ### Numérotation Automatique
-- **Devis** : `SA.<NOM_CLIENT>.MMYYYY001`
-- **Factures** : `FA.<NOM_CLIENT>.MMYYYY001`
-- Auto-incrémentation par client et par mois
-- Exemple : `SA.STAUBINSURMER.112025001`
+- **Devis** : `SA.<NOM_CLIENT>.<SITE>.<VILLE>.MMYYYY001`
+- **Factures** : `FA.<NOM_CLIENT>.<SITE>.<VILLE>.MMYYYY001`
+- Auto-incrémentation par client, site, ville et mois
+- Exemple : `SA.STAUBINSURMER.SITE01.PARIS.112025001`
 
 ### Base de Données
 - **clients** : Informations clients

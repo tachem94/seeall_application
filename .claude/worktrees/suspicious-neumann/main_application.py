@@ -407,65 +407,56 @@ class DatabaseManager:
                 )
             return None
     
-    def generate_quote_number(self, client_name: str, is_invoice: bool = False,
-                              site: str = None, ville: str = None) -> str:
-        """Generate automatic quote number: <PREFIX>.<CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>
-
-        SITE and VILLE segments are optional: each is included only when its value is non-empty.
-        Possible formats depending on what is provided:
-          SA.<CLIENT>.MMYYYY<SEQ>               (both absent)
-          SA.<CLIENT>.<SITE>.MMYYYY<SEQ>        (only site)
-          SA.<CLIENT>.<VILLE>.MMYYYY<SEQ>       (only ville)
-          SA.<CLIENT>.<SITE>.<VILLE>.MMYYYY<SEQ>(both present)
-        """
+    def generate_quote_number(self, client_name: str, site_number: str = "", city: str = "", is_invoice: bool = False) -> str:
+        """Generate automatic quote number: <PREFIX>.<CLIENT>.<SITE>.<VILLE>.MMYYYY001"""
         # Get prefix from configuration
         prefix = BUSINESS_CONFIG.get('invoice_prefix' if is_invoice else 'quote_prefix',
                                    'FA' if is_invoice else 'SA')
 
-        # Clean client name for use in quote number (remove spaces, special chars)
+        # Clean each component (remove spaces and special chars, uppercase)
         clean_name = re.sub(r'[^A-Za-z0-9]', '', client_name.upper())[:10]
+        clean_site = re.sub(r'[^A-Za-z0-9]', '', site_number.upper())[:10]
+        clean_city = re.sub(r'[^A-Za-z0-9]', '', city.upper())[:10]
 
         # Get current month/year
         now = datetime.datetime.now()
         month_year = now.strftime("%m%Y")
 
+        # Use composite key for counter to ensure uniqueness per client/site/city/month
+        counter_key = f"{clean_name}.{clean_site}.{clean_city}"
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # Get or create counter for this client/month combination
+            # Get or create counter for this client/site/city/month combination
             cursor.execute('''
                 INSERT OR IGNORE INTO counters (client_name, month_year, counter)
                 VALUES (?, ?, 0)
-            ''', (clean_name, month_year))
+            ''', (counter_key, month_year))
 
             # Increment counter
             cursor.execute('''
                 UPDATE counters SET counter = counter + 1
                 WHERE client_name = ? AND month_year = ?
-            ''', (clean_name, month_year))
+            ''', (counter_key, month_year))
 
             # Get current counter value
             cursor.execute('''
                 SELECT counter FROM counters
                 WHERE client_name = ? AND month_year = ?
-            ''', (clean_name, month_year))
+            ''', (counter_key, month_year))
 
             counter = cursor.fetchone()[0]
             conn.commit()
 
-        # Start building the dot-separated segments with mandatory parts
-        segments = [prefix, clean_name]
-
-        # Append SITE segment only when a non-empty value was provided
-        if site and site.strip():
-            segments.append(site.strip())
-
-        # Append VILLE segment only when a non-empty value was provided
-        if ville and ville.strip():
-            segments.append(ville.strip())
-
-        # Final format: joined segments + MMYYYY + zero-padded sequence
-        return f"{'.'.join(segments)}.{month_year}{counter:03d}"
+        # Format: <PREFIX>.<CLIENT>.<SITE>.<VILLE>.MMYYYY001
+        parts = [prefix, clean_name]
+        if clean_site:
+            parts.append(clean_site)
+        if clean_city:
+            parts.append(clean_city)
+        parts.append(f"{month_year}{counter:03d}")
+        return ".".join(parts)
     
     def save_quote(self, quote: Quote) -> int:
         """Save quote to database (create new or update existing)"""
@@ -730,20 +721,17 @@ class DatabaseManager:
             
             # Get client info for invoice number generation
             client = self.get_client_by_id(quote_row[2])  # client_id is at index 2
-            
-            # Fetch first site of the original quote to carry SITE and VILLE into the invoice number
-            cursor.execute(
-                'SELECT site_number, city FROM quote_sites WHERE quote_id = ? LIMIT 1',
-                (quote_id,)
-            )
+
+            # Get first site info to include in invoice number
+            cursor.execute('''
+                SELECT site_number, city FROM quote_sites WHERE quote_id = ? LIMIT 1
+            ''', (quote_id,))
             first_site_row = cursor.fetchone()
-            site_val = first_site_row[0] if first_site_row else None
-            ville_val = first_site_row[1] if first_site_row else None
+            first_site_number = first_site_row[0] if first_site_row else ""
+            first_city = first_site_row[1] if first_site_row else ""
 
             # Generate invoice number using the same pattern but with invoice prefix
-            invoice_number = self.generate_quote_number(
-                client.name, is_invoice=True, site=site_val, ville=ville_val
-            )
+            invoice_number = self.generate_quote_number(client.name, first_site_number, first_city, is_invoice=True)
             
             # Convert intervention_date to string format for SQLite
             intervention_date_str = intervention_date.isoformat() if intervention_date else None
@@ -2838,13 +2826,10 @@ class QuoteDialog:
             # Generate quote number if new quote
             is_new_quote = self.quote.id is None
             if not self.quote.number:
-                # Extract SITE and VILLE from the first site entry when available
                 first_site = self.quote.sites[0] if self.quote.sites else None
-                site_val = first_site.site_number if first_site else None
-                ville_val = first_site.city if first_site else None
-                self.quote.number = self.db.generate_quote_number(
-                    self.quote.client.name, site=site_val, ville=ville_val
-                )
+                first_site_number = first_site.site_number if first_site else ""
+                first_city = first_site.city if first_site else ""
+                self.quote.number = self.db.generate_quote_number(self.quote.client.name, first_site_number, first_city)
             
             # Save to database
             quote_id = self.db.save_quote(self.quote)

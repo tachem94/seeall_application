@@ -356,7 +356,32 @@ class DatabaseManager:
             except sqlite3.OperationalError:
                 # Table already exists
                 pass
-    
+
+            # Migration: Rebuild counters table to include site_number and city in the unique key
+            try:
+                cursor.execute("SELECT site_number FROM counters LIMIT 1")
+            except sqlite3.OperationalError:
+                # Column does not exist — migrate the table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS counters_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_name TEXT,
+                        site_number TEXT DEFAULT '',
+                        city TEXT DEFAULT '',
+                        month_year TEXT,
+                        counter INTEGER DEFAULT 0,
+                        UNIQUE(client_name, site_number, city, month_year)
+                    )
+                ''')
+                cursor.execute('''
+                    INSERT OR IGNORE INTO counters_new (client_name, site_number, city, month_year, counter)
+                    SELECT client_name, '', '', month_year, counter FROM counters
+                ''')
+                cursor.execute('DROP TABLE counters')
+                cursor.execute('ALTER TABLE counters_new RENAME TO counters')
+                conn.commit()
+                print("Migration: Rebuilt counters table with site_number and city columns")
+
     def add_client(self, client: Client) -> int:
         """Add a new client to the database"""
         with sqlite3.connect(self.db_path) as conn:
@@ -407,23 +432,16 @@ class DatabaseManager:
                 )
             return None
     
-    def generate_quote_number(self, client_name: str, is_invoice: bool = False,
-                              site: str = None, ville: str = None) -> str:
-        """Generate automatic quote number: <PREFIX>.<CLIENT>[.<SITE>][.<VILLE>].MMYYYY<SEQ>
-
-        SITE and VILLE segments are optional: each is included only when its value is non-empty.
-        Possible formats depending on what is provided:
-          SA.<CLIENT>.MMYYYY<SEQ>               (both absent)
-          SA.<CLIENT>.<SITE>.MMYYYY<SEQ>        (only site)
-          SA.<CLIENT>.<VILLE>.MMYYYY<SEQ>       (only ville)
-          SA.<CLIENT>.<SITE>.<VILLE>.MMYYYY<SEQ>(both present)
-        """
+    def generate_quote_number(self, client_name: str, site_number: str = "", city: str = "", is_invoice: bool = False) -> str:
+        """Generate automatic quote number: <PREFIX>.<client_name>.<site_number>.<city>.MMYYYY001"""
         # Get prefix from configuration
         prefix = BUSINESS_CONFIG.get('invoice_prefix' if is_invoice else 'quote_prefix',
                                    'FA' if is_invoice else 'SA')
 
-        # Clean client name for use in quote number (remove spaces, special chars)
+        # Clean each component (remove spaces and special chars, uppercase)
         clean_name = re.sub(r'[^A-Za-z0-9]', '', client_name.upper())[:10]
+        clean_site = re.sub(r'[^A-Za-z0-9]', '', site_number.upper())[:10]
+        clean_city = re.sub(r'[^A-Za-z0-9]', '', city.upper())[:10]
 
         # Get current month/year
         now = datetime.datetime.now()
@@ -432,40 +450,30 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # Get or create counter for this client/month combination
+            # Get or create counter for this client/site/city/month combination
             cursor.execute('''
-                INSERT OR IGNORE INTO counters (client_name, month_year, counter)
-                VALUES (?, ?, 0)
-            ''', (clean_name, month_year))
+                INSERT OR IGNORE INTO counters (client_name, site_number, city, month_year, counter)
+                VALUES (?, ?, ?, ?, 0)
+            ''', (clean_name, clean_site, clean_city, month_year))
 
             # Increment counter
             cursor.execute('''
                 UPDATE counters SET counter = counter + 1
-                WHERE client_name = ? AND month_year = ?
-            ''', (clean_name, month_year))
+                WHERE client_name = ? AND site_number = ? AND city = ? AND month_year = ?
+            ''', (clean_name, clean_site, clean_city, month_year))
 
             # Get current counter value
             cursor.execute('''
                 SELECT counter FROM counters
-                WHERE client_name = ? AND month_year = ?
-            ''', (clean_name, month_year))
+                WHERE client_name = ? AND site_number = ? AND city = ? AND month_year = ?
+            ''', (clean_name, clean_site, clean_city, month_year))
 
             counter = cursor.fetchone()[0]
             conn.commit()
 
-        # Start building the dot-separated segments with mandatory parts
-        segments = [prefix, clean_name]
-
-        # Append SITE segment only when a non-empty value was provided
-        if site and site.strip():
-            segments.append(site.strip())
-
-        # Append VILLE segment only when a non-empty value was provided
-        if ville and ville.strip():
-            segments.append(ville.strip())
-
-        # Final format: joined segments + MMYYYY + zero-padded sequence
-        return f"{'.'.join(segments)}.{month_year}{counter:03d}"
+        # Format: <PREFIX>.<CLIENT>.<SITE>.<VILLE>.MMYYYY001
+        parts = [prefix, clean_name, clean_site, clean_city]
+        return f"{'.'.join(p for p in parts if p)}.{month_year}{counter:03d}"
     
     def save_quote(self, quote: Quote) -> int:
         """Save quote to database (create new or update existing)"""
@@ -730,20 +738,17 @@ class DatabaseManager:
             
             # Get client info for invoice number generation
             client = self.get_client_by_id(quote_row[2])  # client_id is at index 2
-            
-            # Fetch first site of the original quote to carry SITE and VILLE into the invoice number
-            cursor.execute(
-                'SELECT site_number, city FROM quote_sites WHERE quote_id = ? LIMIT 1',
-                (quote_id,)
-            )
+
+            # Get first site of the original quote for invoice number generation
+            cursor.execute('''
+                SELECT site_number, city FROM quote_sites WHERE quote_id = ? ORDER BY id LIMIT 1
+            ''', (quote_id,))
             first_site_row = cursor.fetchone()
-            site_val = first_site_row[0] if first_site_row else None
-            ville_val = first_site_row[1] if first_site_row else None
+            invoice_site_number = first_site_row[0] if first_site_row else ""
+            invoice_city = first_site_row[1] if first_site_row else ""
 
             # Generate invoice number using the same pattern but with invoice prefix
-            invoice_number = self.generate_quote_number(
-                client.name, is_invoice=True, site=site_val, ville=ville_val
-            )
+            invoice_number = self.generate_quote_number(client.name, site_number=invoice_site_number, city=invoice_city, is_invoice=True)
             
             # Convert intervention_date to string format for SQLite
             intervention_date_str = intervention_date.isoformat() if intervention_date else None
@@ -2838,12 +2843,11 @@ class QuoteDialog:
             # Generate quote number if new quote
             is_new_quote = self.quote.id is None
             if not self.quote.number:
-                # Extract SITE and VILLE from the first site entry when available
                 first_site = self.quote.sites[0] if self.quote.sites else None
-                site_val = first_site.site_number if first_site else None
-                ville_val = first_site.city if first_site else None
                 self.quote.number = self.db.generate_quote_number(
-                    self.quote.client.name, site=site_val, ville=ville_val
+                    self.quote.client.name,
+                    site_number=first_site.site_number if first_site else "",
+                    city=first_site.city if first_site else "",
                 )
             
             # Save to database
