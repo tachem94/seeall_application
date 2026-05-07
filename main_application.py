@@ -2327,12 +2327,32 @@ class QuoteDialog:
         # Create dialog window
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Nouveau Devis" if not quote else "Modifier Devis")
-        self.dialog.geometry("900x750")
         self.dialog.transient(parent)
         self.dialog.grab_set()
-        
+        self.dialog.minsize(800, 500)
+
+        # Size dialog relative to screen and center it on the parent
+        screen_h = self.dialog.winfo_screenheight()
+        screen_w = self.dialog.winfo_screenwidth()
+        win_w = 900
+        win_h = min(750, max(550, screen_h - 120))
+        parent.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw - win_w) // 2
+            y = py + (ph - win_h) // 2
+        except tk.TclError:
+            x = (screen_w - win_w) // 2
+            y = (screen_h - win_h) // 2
+        x = max(0, min(x, screen_w - win_w))
+        y = max(0, min(y, screen_h - win_h))
+        self.dialog.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
         self.setup_ui()
-        
+
         if quote:
             self.load_quote_data()
     
@@ -2394,10 +2414,27 @@ class QuoteDialog:
         
         # Load clients
         self.load_clients()
-        
-        # Sites management frame
+
+        # Buttons frame — packed FIRST at the bottom so it always stays visible
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(side='bottom', fill='x', pady=(10, 0))
+
+        separator = ttk.Separator(buttons_frame, orient='horizontal')
+        separator.pack(fill='x', pady=(0, 10))
+
+        ttk.Button(buttons_frame, text="Annuler", command=self.cancel).pack(side='right', padx=(5, 0))
+        ttk.Button(buttons_frame, text="Sauvegarder", command=self.save_quote).pack(side='right')
+
+        # Totals frame — packed at the bottom, above the buttons
+        totals_frame = ttk.LabelFrame(main_frame, text="Totaux", padding=10)
+        totals_frame.pack(side='bottom', fill='x', pady=(0, 10))
+
+        self.totals_label = ttk.Label(totals_frame, text="Total HT: 0.00 € | TVA: 0.00 € | TTC: 0.00 €")
+        self.totals_label.pack()
+
+        # Sites management frame — fills the remaining space between client and totals
         sites_frame = ttk.LabelFrame(main_frame, text="Sites d'Intervention", padding=10)
-        sites_frame.pack(fill='both', expand=True, pady=(0, 10))
+        sites_frame.pack(side='top', fill='both', expand=True, pady=(0, 10))
         
         # Add site form
         add_site_frame = ttk.Frame(sites_frame)
@@ -2504,24 +2541,6 @@ class QuoteDialog:
         # Remove site button
         remove_site_button = ttk.Button(site_buttons_frame, text="Supprimer Site", command=self.remove_site)
         remove_site_button.pack(side='left')
-        
-        # Totals frame
-        totals_frame = ttk.LabelFrame(main_frame, text="Totaux", padding=10)
-        totals_frame.pack(fill='x', pady=(0, 10))
-        
-        self.totals_label = ttk.Label(totals_frame, text="Total HT: 0.00 € | TVA: 0.00 € | TTC: 0.00 €")
-        self.totals_label.pack()
-        
-        # Buttons frame
-        buttons_frame = ttk.Frame(main_frame)
-        buttons_frame.pack(fill='x', pady=(10, 0))
-        
-        # Add some visual separation before buttons
-        separator = ttk.Separator(buttons_frame, orient='horizontal')
-        separator.pack(fill='x', pady=(0, 10))
-        
-        ttk.Button(buttons_frame, text="Annuler", command=self.cancel).pack(side='right', padx=(5, 0))
-        ttk.Button(buttons_frame, text="Sauvegarder", command=self.save_quote).pack(side='right')
     
     def load_clients(self):
         """Load clients into combobox"""
