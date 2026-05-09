@@ -44,6 +44,16 @@ except ImportError:
     DOCX_AVAILABLE = False
     print("Warning: python-docx not installed. Word export will not be available.")
 
+# Excel export imports
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    print("Warning: openpyxl not installed. Excel export will not be available.")
+
 # Import configuration
 try:
     from config import COMPANY_CONFIG, BUSINESS_CONFIG, UI_CONFIG, DATABASE_CONFIG
@@ -162,6 +172,7 @@ class Quote:
     site_address: str = ""  # DEPRECATED - kept for migration compatibility
     is_invoiced: bool = False  # True if this quote has been converted to an invoice
     linked_invoice_id: Optional[int] = None  # ID of the corresponding invoice
+    is_paid: bool = False  # True when the invoice has been paid (only meaningful when is_invoice=True)
     
     @property
     def total_ht(self) -> float:
@@ -242,6 +253,7 @@ class DatabaseManager:
                     site_address TEXT,
                     is_invoiced BOOLEAN DEFAULT FALSE,
                     linked_invoice_id INTEGER,
+                    is_paid BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (client_id) REFERENCES clients (id),
                     FOREIGN KEY (linked_invoice_id) REFERENCES quotes (id)
@@ -344,6 +356,15 @@ class DatabaseManager:
                 conn.commit()
             except sqlite3.OperationalError:
                 # Columns already exist
+                pass
+
+            # Migration: Add is_paid column for invoice payment tracking
+            try:
+                cursor.execute("ALTER TABLE quotes ADD COLUMN is_paid BOOLEAN DEFAULT FALSE")
+                conn.commit()
+                print("Migration: Added is_paid column to quotes table")
+            except sqlite3.OperationalError:
+                # Column already exists, migration not needed
                 pass
             
             # Create new sites table if it doesn't exist
@@ -486,26 +507,27 @@ class DatabaseManager:
             if quote.id is None:
                 # Create new quote
                 cursor.execute('''
-                    INSERT INTO quotes (number, client_id, typology, quote_date, intervention_date, is_invoice, 
-                                      invoice_number, order_number, site_number, site_address, 
-                                      is_invoiced, linked_invoice_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (quote.number, quote.client_id, quote.typology, quote_date_str, intervention_date_str, 
-                      quote.is_invoice, quote.invoice_number, quote.order_number, 
-                      quote.site_number, quote.site_address, quote.is_invoiced, quote.linked_invoice_id))
-                
+                    INSERT INTO quotes (number, client_id, typology, quote_date, intervention_date, is_invoice,
+                                      invoice_number, order_number, site_number, site_address,
+                                      is_invoiced, linked_invoice_id, is_paid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (quote.number, quote.client_id, quote.typology, quote_date_str, intervention_date_str,
+                      quote.is_invoice, quote.invoice_number, quote.order_number,
+                      quote.site_number, quote.site_address, quote.is_invoiced, quote.linked_invoice_id,
+                      quote.is_paid))
+
                 quote_id = cursor.lastrowid
                 quote.id = quote_id  # Set the ID for the quote object
             else:
                 # Update existing quote
                 cursor.execute('''
-                    UPDATE quotes SET client_id=?, typology=?, quote_date=?, intervention_date=?, 
-                                    invoice_number=?, order_number=?, site_number=?, site_address=?, 
-                                    is_invoiced=?, linked_invoice_id=?
+                    UPDATE quotes SET client_id=?, typology=?, quote_date=?, intervention_date=?,
+                                    invoice_number=?, order_number=?, site_number=?, site_address=?,
+                                    is_invoiced=?, linked_invoice_id=?, is_paid=?
                     WHERE id=?
                 ''', (quote.client_id, quote.typology, quote_date_str, intervention_date_str,
                       quote.invoice_number, quote.order_number, quote.site_number, quote.site_address,
-                      quote.is_invoiced, quote.linked_invoice_id, quote.id))
+                      quote.is_invoiced, quote.linked_invoice_id, quote.is_paid, quote.id))
                 
                 quote_id = quote.id
                 
@@ -537,10 +559,10 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT q.id, q.number, q.client_id, q.typology, q.quote_date, q.intervention_date, 
-                       q.is_invoice, q.invoice_number, q.order_number, q.site_number, 
+                SELECT q.id, q.number, q.client_id, q.typology, q.quote_date, q.intervention_date,
+                       q.is_invoice, q.invoice_number, q.order_number, q.site_number,
                        q.site_address, q.is_invoiced, q.linked_invoice_id, q.created_at,
-                       c.name as client_name
+                       c.name as client_name, q.is_paid
                 FROM quotes q
                 LEFT JOIN clients c ON q.client_id = c.id
                 WHERE q.is_invoice = ?
@@ -585,7 +607,8 @@ class DatabaseManager:
                     site_address=row[10] or "",
                     is_invoiced=bool(row[11]) if row[11] is not None else False,
                     linked_invoice_id=row[12] if row[12] else None,
-                    created_at=created_at
+                    created_at=created_at,
+                    is_paid=bool(row[15]) if len(row) > 15 and row[15] is not None else False,
                 )
                 
                 # Get client info
@@ -717,6 +740,17 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('SELECT COUNT(*) FROM quotes WHERE client_id = ?', (client_id,))
             return cursor.fetchone()[0]
+
+    def set_invoice_paid(self, invoice_id: int, is_paid: bool) -> bool:
+        """Atomically toggle the paid status of an invoice. Returns True on success."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE quotes SET is_paid = ? WHERE id = ? AND is_invoice = 1',
+                (bool(is_paid), invoice_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def convert_quote_to_invoice(self, quote_id: int, order_number: str, intervention_date: datetime.date = None) -> str:
         """Convert a quote to an invoice by creating a new invoice entry and marking the original quote as invoiced"""
@@ -1176,6 +1210,179 @@ class WordGenerator:
         # Save document
         doc.save(filepath)
 
+def export_quotes_to_excel(
+    quotes: 'List[Quote]',
+    file_path: str,
+    is_invoice: bool = False,
+    linked_invoice_numbers: 'Optional[Dict[int, str]]' = None,
+) -> None:
+    """Write a list of Quote objects to an .xlsx workbook.
+
+    Two sheets are produced: a header sheet (one row per quote/invoice with
+    every meaningful field) and a 'Sites' sheet (one row per site, joined to
+    its parent via the document number). Numeric columns use real Excel
+    numbers/dates so totals can be summed in pivot tables.
+
+    For the quotes sheet, the optional ``linked_invoice_numbers`` mapping
+    (linked_invoice_id → invoice_number) is used to fill the 'Numéro facture
+    liée' column. If absent, that cell stays empty.
+    """
+    if not EXCEL_AVAILABLE:
+        raise RuntimeError("openpyxl is not installed")
+    linked_invoice_numbers = linked_invoice_numbers or {}
+
+    wb = Workbook()
+    main_ws = wb.active
+    main_ws.title = "Factures" if is_invoice else "Devis"
+
+    header_fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid") if is_invoice \
+        else PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    if is_invoice:
+        columns = [
+            ("Numéro Facture", lambda q: q.invoice_number or q.number or ""),
+            ("Bon de commande", lambda q: q.order_number or ""),
+            ("Client", lambda q: q.client.name if q.client else ""),
+            ("SIRET client", lambda q: q.client.siret if q.client else ""),
+            ("Email client", lambda q: q.client.email if q.client else ""),
+            ("Téléphone client", lambda q: q.client.phone if q.client else ""),
+            ("Adresse client", lambda q: q.client.address if q.client else ""),
+            ("Typologie", lambda q: q.typology or ""),
+            ("Date d'intervention", lambda q: q.intervention_date or (q.created_at.date() if q.created_at else None)),
+            ("Sites", lambda q: q.site_numbers_display or ""),
+            ("Nombre de sites", lambda q: len(q.sites)),
+            ("Total HT", lambda q: float(q.total_ht or 0.0)),
+            ("Total TVA", lambda q: float(q.total_tva or 0.0)),
+            ("Total TTC", lambda q: float(q.total_ttc or 0.0)),
+            ("Payée", lambda q: "Oui" if q.is_paid else "Non"),
+            ("Date de création", lambda q: q.created_at if q.created_at else None),
+        ]
+    else:
+        columns = [
+            ("Numéro", lambda q: q.number or ""),
+            ("Client", lambda q: q.client.name if q.client else ""),
+            ("SIRET client", lambda q: q.client.siret if q.client else ""),
+            ("Email client", lambda q: q.client.email if q.client else ""),
+            ("Téléphone client", lambda q: q.client.phone if q.client else ""),
+            ("Adresse client", lambda q: q.client.address if q.client else ""),
+            ("Typologie", lambda q: q.typology or ""),
+            ("Date du devis", lambda q: q.quote_date or (q.created_at.date() if q.created_at else None)),
+            ("Date d'intervention", lambda q: q.intervention_date),
+            ("Sites", lambda q: q.site_numbers_display or ""),
+            ("Nombre de sites", lambda q: len(q.sites)),
+            ("Total HT", lambda q: float(q.total_ht or 0.0)),
+            ("Total TVA", lambda q: float(q.total_tva or 0.0)),
+            ("Total TTC", lambda q: float(q.total_ttc or 0.0)),
+            ("Facturé", lambda q: "Oui" if q.is_invoiced else "Non"),
+            ("Numéro facture liée",
+             lambda q: linked_invoice_numbers.get(q.linked_invoice_id, "") if q.linked_invoice_id else ""),
+            ("Date de création", lambda q: q.created_at if q.created_at else None),
+        ]
+
+    main_ws.append([label for label, _ in columns])
+    for col_idx in range(1, len(columns) + 1):
+        cell = main_ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    money_format = '#,##0.00\\ €'
+    date_format = 'DD/MM/YYYY'
+    datetime_format = 'DD/MM/YYYY HH:MM'
+
+    for q in quotes:
+        row_values = [getter(q) for _, getter in columns]
+        main_ws.append(row_values)
+        excel_row = main_ws.max_row
+        for idx, (label, _) in enumerate(columns, start=1):
+            cell = main_ws.cell(row=excel_row, column=idx)
+            if label in ("Total HT", "Total TVA", "Total TTC"):
+                cell.number_format = money_format
+            elif label in ("Date du devis", "Date d'intervention"):
+                cell.number_format = date_format
+            elif label == "Date de création":
+                cell.number_format = datetime_format
+        # Color the row green if the invoice is paid, to mirror the in-app UI.
+        if is_invoice and q.is_paid:
+            paid_fill = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid")
+            for idx in range(1, len(columns) + 1):
+                main_ws.cell(row=excel_row, column=idx).fill = paid_fill
+
+    main_ws.freeze_panes = "A2"
+
+    # Auto-size columns based on the longest cell content (capped to keep the
+    # workbook readable on narrow screens).
+    for col_idx, (label, _) in enumerate(columns, start=1):
+        letter = get_column_letter(col_idx)
+        max_len = len(label)
+        for cell in main_ws[letter][1:]:
+            value = cell.value
+            if value is None:
+                continue
+            text = value.strftime("%d/%m/%Y %H:%M") if isinstance(value, datetime.datetime) \
+                else value.strftime("%d/%m/%Y") if isinstance(value, datetime.date) \
+                else str(value)
+            if len(text) > max_len:
+                max_len = len(text)
+        main_ws.column_dimensions[letter].width = min(max_len + 2, 50)
+
+    # Sites detail sheet — one row per site, joined to its parent document.
+    sites_ws = wb.create_sheet(title="Sites détaillés")
+    site_columns = [
+        "Numéro document",
+        "Client",
+        "Numéro site",
+        "Adresse",
+        "Code postal",
+        "Ville",
+        "Latitude",
+        "Longitude",
+        "Description",
+        "Prix HT",
+    ]
+    sites_ws.append(site_columns)
+    for col_idx in range(1, len(site_columns) + 1):
+        cell = sites_ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    for q in quotes:
+        doc_number = (q.invoice_number if is_invoice else q.number) or q.number or ""
+        client_name = q.client.name if q.client else ""
+        for site in q.sites:
+            sites_ws.append([
+                doc_number,
+                client_name,
+                site.site_number or "",
+                site.address or "",
+                site.postal_code or "",
+                site.city or "",
+                site.latitude or "",
+                site.longitude or "",
+                site.description or "",
+                float(site.price_ht or 0.0),
+            ])
+            sites_ws.cell(row=sites_ws.max_row, column=len(site_columns)).number_format = money_format
+
+    sites_ws.freeze_panes = "A2"
+    for col_idx, label in enumerate(site_columns, start=1):
+        letter = get_column_letter(col_idx)
+        max_len = len(label)
+        for cell in sites_ws[letter][1:]:
+            value = cell.value
+            if value is None:
+                continue
+            text = str(value)
+            if len(text) > max_len:
+                max_len = len(text)
+        sites_ws.column_dimensions[letter].width = min(max_len + 2, 50)
+
+    wb.save(file_path)
+
+
 class BackupManager:
     """Copy the SQLite database to a backup folder and rotate old backups.
 
@@ -1474,7 +1681,13 @@ class MainApplication:
     INVOICES_COLUMN_TYPES = {
         'Numéro Facture': 'text', 'Bon de Commande': 'text', 'Client': 'text',
         'Date': 'date', 'Sites': 'text', 'Total HT': 'price', 'Total TTC': 'price',
+        'Payée': 'text',
     }
+
+    # Values used by the Factures État (paid status) filter combobox.
+    PAID_FILTER_ALL = 'Toutes'
+    PAID_FILTER_PAID = 'Payées'
+    PAID_FILTER_UNPAID = 'Non payées'
 
     def setup_quotes_tab(self):
         """Setup quotes management tab"""
@@ -1491,6 +1704,9 @@ class MainApplication:
 
         delete_quote_button = ttk.Button(buttons_frame, text="Supprimer Devis", command=self.delete_selected_quote)
         delete_quote_button.pack(side='left')
+
+        ttk.Button(buttons_frame, text="Exporter Excel",
+                   command=self.export_quotes_excel).pack(side='left', padx=(10, 0))
 
         # Quotes list
         list_frame = ttk.LabelFrame(self.quotes_frame, text="Devis existants", padding=10)
@@ -1587,8 +1803,11 @@ class MainApplication:
         invoices_buttons_frame = ttk.Frame(self.invoices_frame)
         invoices_buttons_frame.pack(pady=5)
         
-        ttk.Button(invoices_buttons_frame, text="Supprimer Facture", 
+        ttk.Button(invoices_buttons_frame, text="Supprimer Facture",
                   command=self.delete_selected_invoice).pack(side='left')
+
+        ttk.Button(invoices_buttons_frame, text="Exporter Excel",
+                   command=self.export_invoices_excel).pack(side='left', padx=(10, 0))
         
         # Invoices list
         list_frame = ttk.LabelFrame(self.invoices_frame, text="Factures existantes", padding=10)
@@ -1613,6 +1832,16 @@ class MainApplication:
         invoices_date_to.pack(side='left')
         ttk.Label(invoices_search_frame, text="(JJ/MM/AAAA)", foreground='gray').pack(side='left', padx=(2, 5))
 
+        ttk.Label(invoices_search_frame, text="État:").pack(side='left', padx=(10, 2))
+        self.invoices_paid_filter_var = tk.StringVar(value=self.PAID_FILTER_ALL)
+        invoices_paid_filter = ttk.Combobox(
+            invoices_search_frame, textvariable=self.invoices_paid_filter_var,
+            values=[self.PAID_FILTER_ALL, self.PAID_FILTER_PAID, self.PAID_FILTER_UNPAID],
+            state='readonly', width=12,
+        )
+        invoices_paid_filter.pack(side='left', padx=(0, 5))
+        invoices_paid_filter.bind('<<ComboboxSelected>>', lambda event: self.apply_invoices_filter())
+
         ttk.Button(invoices_search_frame, text="Filtrer", command=self.apply_invoices_filter).pack(side='left')
         ttk.Button(invoices_search_frame, text="Réinitialiser", command=self.reset_invoices_filter).pack(side='left', padx=(5, 0))
         invoices_search_entry.bind('<Return>', lambda event: self.apply_invoices_filter())
@@ -1620,7 +1849,7 @@ class MainApplication:
         invoices_date_to.bind('<Return>', lambda event: self.apply_invoices_filter())
 
         # Treeview for invoices list
-        columns = ('Numéro Facture', 'Bon de Commande', 'Client', 'Date', 'Sites', 'Total HT', 'Total TTC')
+        columns = ('Numéro Facture', 'Bon de Commande', 'Client', 'Date', 'Sites', 'Total HT', 'Total TTC', 'Payée')
         self.invoices_tree = ttk.Treeview(list_frame, columns=columns, show='headings')
         self.invoices_sort_state = {'column': None, 'reverse': False}
 
@@ -1633,8 +1862,14 @@ class MainApplication:
             )
             if col == 'Sites':
                 self.invoices_tree.column(col, width=120)
+            elif col == 'Payée':
+                self.invoices_tree.column(col, width=90)
             else:
                 self.invoices_tree.column(col, width=150)
+
+        # Row styling: green for paid invoices, neutral for unpaid
+        self.invoices_tree.tag_configure('paid', background='#c8e6c9')
+        self.invoices_tree.tag_configure('unpaid', background='white')
 
         # Scrollbar
         scrollbar_invoices = ttk.Scrollbar(list_frame, orient='vertical', command=self.invoices_tree.yview)
@@ -1643,10 +1878,29 @@ class MainApplication:
         self.invoices_tree.pack(side='left', fill='both', expand=True)
         scrollbar_invoices.pack(side='right', fill='y')
 
-        # Totals footer (HT / TTC over the visible/filtered rows)
-        self.invoices_totals_var = tk.StringVar(value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 factures)")
-        ttk.Label(self.invoices_frame, textvariable=self.invoices_totals_var,
-                  font=('Arial', 11, 'bold')).pack(anchor='e', padx=20, pady=(0, 8))
+        # Totals footer over the currently visible/filtered rows: a stacked
+        # block with the grand total on top and the paid/unpaid breakdown
+        # below in green/red so the cash-flow split is readable at a glance.
+        invoices_totals_frame = ttk.Frame(self.invoices_frame)
+        invoices_totals_frame.pack(anchor='e', padx=20, pady=(0, 8), fill='x')
+
+        self.invoices_totals_var = tk.StringVar(
+            value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 factures)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_totals_var,
+                  font=('Arial', 11, 'bold')).pack(anchor='e')
+
+        self.invoices_paid_totals_var = tk.StringVar(
+            value="Payées : 0.00 € HT  /  0.00 € TTC  (0)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_paid_totals_var,
+                  foreground='#2e7d32').pack(anchor='e')
+
+        self.invoices_unpaid_totals_var = tk.StringVar(
+            value="Non payées : 0.00 € HT  /  0.00 € TTC  (0)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_unpaid_totals_var,
+                  foreground='#c62828').pack(anchor='e')
         
         # Bind single-click to handle Sites column clicks
         self.invoices_tree.bind('<Button-1>', self.on_invoices_tree_click)
@@ -1657,8 +1911,13 @@ class MainApplication:
         self.invoices_context_menu.add_command(label="Exporter PDF", command=self.export_invoice_pdf)
         self.invoices_context_menu.add_command(label="Exporter Word", command=self.export_invoice_word)
         self.invoices_context_menu.add_separator()
+        # Index 4 — label is updated dynamically in show_invoices_context_menu
+        # depending on the current paid status of the selected invoice.
+        self.invoices_context_menu.add_command(label="Marquer comme payée",
+                                               command=self.toggle_selected_invoice_paid)
+        self.invoices_context_menu.add_separator()
         self.invoices_context_menu.add_command(label="Supprimer", command=self.delete_selected_invoice)
-        
+
         self.invoices_tree.bind('<Button-3>', self.show_invoices_context_menu)
         
         # Load invoices
@@ -2058,10 +2317,19 @@ class MainApplication:
         date_from, date_to = (None, None)
         if hasattr(self, 'invoices_date_from_var'):
             date_from, date_to, _ = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+        paid_filter = self.PAID_FILTER_ALL
+        if hasattr(self, 'invoices_paid_filter_var'):
+            paid_filter = self.invoices_paid_filter_var.get() or self.PAID_FILTER_ALL
 
         total_ht = 0.0
         total_ttc = 0.0
         visible_count = 0
+        paid_ht = 0.0
+        paid_ttc = 0.0
+        paid_count = 0
+        unpaid_ht = 0.0
+        unpaid_ttc = 0.0
+        unpaid_count = 0
         for invoice in invoices:
             client_name = invoice.client.name if invoice.client else "Client inconnu"
 
@@ -2073,6 +2341,8 @@ class MainApplication:
             else:
                 date_str = ""
 
+            paid_label = "✓ Payée" if invoice.is_paid else "Non payée"
+
             if search_text:
                 searchable_fields = [
                     invoice.invoice_number or "",
@@ -2082,6 +2352,7 @@ class MainApplication:
                     invoice.site_numbers_display or "",
                     f"{invoice.total_ht:.2f}",
                     f"{invoice.total_ttc:.2f}",
+                    paid_label,
                 ]
                 if not any(search_text in str(field).lower() for field in searchable_fields if field):
                     continue
@@ -2092,6 +2363,12 @@ class MainApplication:
                 if not self._date_in_range(row_date, date_from, date_to):
                     continue
 
+            # Paid status filter
+            if paid_filter == self.PAID_FILTER_PAID and not invoice.is_paid:
+                continue
+            if paid_filter == self.PAID_FILTER_UNPAID and invoice.is_paid:
+                continue
+
             self.invoices_tree.insert('', 'end', values=(
                 invoice.invoice_number or "N/A",
                 invoice.order_number or "N/A",
@@ -2099,17 +2376,36 @@ class MainApplication:
                 date_str,
                 invoice.site_numbers_display,  # Show site numbers
                 f"{invoice.total_ht:.2f} €",
-                f"{invoice.total_ttc:.2f} €"
-            ), tags=(str(invoice.id),))
+                f"{invoice.total_ttc:.2f} €",
+                paid_label,
+            ), tags=(str(invoice.id), 'paid' if invoice.is_paid else 'unpaid'))
 
-            total_ht += invoice.total_ht or 0.0
-            total_ttc += invoice.total_ttc or 0.0
+            row_ht = invoice.total_ht or 0.0
+            row_ttc = invoice.total_ttc or 0.0
+            total_ht += row_ht
+            total_ttc += row_ttc
             visible_count += 1
+            if invoice.is_paid:
+                paid_ht += row_ht
+                paid_ttc += row_ttc
+                paid_count += 1
+            else:
+                unpaid_ht += row_ht
+                unpaid_ttc += row_ttc
+                unpaid_count += 1
 
         # Update totals footer
         if hasattr(self, 'invoices_totals_var'):
             self.invoices_totals_var.set(
                 f"Total HT: {total_ht:.2f} €    Total TTC: {total_ttc:.2f} €    ({visible_count} factures)"
+            )
+        if hasattr(self, 'invoices_paid_totals_var'):
+            self.invoices_paid_totals_var.set(
+                f"Payées : {paid_ht:.2f} € HT  /  {paid_ttc:.2f} € TTC  ({paid_count})"
+            )
+        if hasattr(self, 'invoices_unpaid_totals_var'):
+            self.invoices_unpaid_totals_var.set(
+                f"Non payées : {unpaid_ht:.2f} € HT  /  {unpaid_ttc:.2f} € TTC  ({unpaid_count})"
             )
 
         # Re-apply current sort if any
@@ -2153,13 +2449,15 @@ class MainApplication:
         self.refresh_invoices_list()
 
     def reset_invoices_filter(self):
-        """Reset invoices search filter (text + date range)"""
+        """Reset invoices search filter (text + date range + paid status)"""
         if hasattr(self, 'invoices_search_var'):
             self.invoices_search_var.set("")
         if hasattr(self, 'invoices_date_from_var'):
             self.invoices_date_from_var.set("")
         if hasattr(self, 'invoices_date_to_var'):
             self.invoices_date_to_var.set("")
+        if hasattr(self, 'invoices_paid_filter_var'):
+            self.invoices_paid_filter_var.set(self.PAID_FILTER_ALL)
         self.refresh_invoices_list()
 
     def new_quote(self):
@@ -2596,11 +2894,142 @@ class MainApplication:
                 break
     
     def show_invoices_context_menu(self, event):
-        """Show context menu for invoices"""
+        """Show context menu for invoices.
+
+        The 'Marquer comme...' entry label is updated based on the paid status
+        of the row under the cursor so the action matches what the user sees.
+        """
+        # Identify the row under the cursor and select it (so the toggle
+        # operates on the row the user right-clicked, not the previous selection).
+        row_id = self.invoices_tree.identify_row(event.y)
+        if row_id:
+            self.invoices_tree.selection_set(row_id)
+            invoice = self._selected_invoice()
+            label = "Marquer comme non payée" if (invoice and invoice.is_paid) else "Marquer comme payée"
+        else:
+            label = "Marquer comme payée"
+        # Index 4 in setup matches our 'toggle paid' command.
+        try:
+            self.invoices_context_menu.entryconfigure(4, label=label)
+        except tk.TclError:
+            pass
         try:
             self.invoices_context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.invoices_context_menu.grab_release()
+
+    def _selected_invoice(self):
+        """Return the Quote object for the currently selected invoice, or None."""
+        selection = self.invoices_tree.selection()
+        if not selection:
+            return None
+        item = self.invoices_tree.item(selection[0])
+        try:
+            invoice_id = int(item['tags'][0])
+        except (ValueError, IndexError, TypeError):
+            return None
+        invoices = self.db.get_quotes(is_invoice=True)
+        return next((inv for inv in invoices if inv.id == invoice_id), None)
+
+    def toggle_selected_invoice_paid(self):
+        """Toggle the paid status of the selected invoice."""
+        invoice = self._selected_invoice()
+        if invoice is None:
+            messagebox.showinfo("Information", "Veuillez sélectionner une facture.")
+            return
+        new_status = not invoice.is_paid
+        if not self.db.set_invoice_paid(invoice.id, new_status):
+            messagebox.showerror("Erreur", "La mise à jour du statut de paiement a échoué.")
+            return
+        self.refresh_invoices_list()
+
+    # ---------- Excel export ----------
+
+    def _visible_doc_ids(self, tree) -> 'List[int]':
+        """Return the IDs (in display order) of the rows currently visible in tree."""
+        ids: List[int] = []
+        for iid in tree.get_children(''):
+            tags = tree.item(iid, 'tags')
+            if not tags:
+                continue
+            try:
+                ids.append(int(tags[0]))
+            except (ValueError, TypeError):
+                continue
+        return ids
+
+    def _export_excel(self, *, is_invoice: bool):
+        """Shared Excel-export flow for the Devis and Factures tabs."""
+        if not EXCEL_AVAILABLE:
+            messagebox.showerror(
+                "Export Excel indisponible",
+                "Le module openpyxl n'est pas installé.\n\n"
+                "Installez-le avec :\n    pip install openpyxl"
+            )
+            return
+
+        tree = self.invoices_tree if is_invoice else self.quotes_tree
+        visible_ids = self._visible_doc_ids(tree)
+        if not visible_ids:
+            messagebox.showinfo(
+                "Export Excel",
+                "Aucune ligne à exporter (la liste est vide ou entièrement filtrée)."
+            )
+            return
+
+        # Re-fetch from DB so the export reflects the latest persisted state,
+        # not stale tree data, and order matches what the user sees.
+        all_docs = self.db.get_quotes(is_invoice=is_invoice)
+        by_id = {doc.id: doc for doc in all_docs}
+        docs = [by_id[i] for i in visible_ids if i in by_id]
+        if not docs:
+            messagebox.showinfo(
+                "Export Excel",
+                "Aucune ligne à exporter (les lignes visibles n'ont pas été retrouvées en base)."
+            )
+            return
+
+        # Lookup of linked invoice numbers — only relevant for the quotes export.
+        linked_invoice_numbers: Dict[int, str] = {}
+        if not is_invoice:
+            invoices = self.db.get_quotes(is_invoice=True)
+            linked_invoice_numbers = {
+                inv.id: (inv.invoice_number or inv.number or "")
+                for inv in invoices
+            }
+
+        default_name = ("factures" if is_invoice else "devis") + \
+            f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        target_path = filedialog.asksaveasfilename(
+            title=f"Exporter les {'factures' if is_invoice else 'devis'} au format Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Classeur Excel", "*.xlsx"), ("Tous les fichiers", "*.*")],
+        )
+        if not target_path:
+            return  # user cancelled
+
+        try:
+            export_quotes_to_excel(
+                docs, target_path, is_invoice=is_invoice,
+                linked_invoice_numbers=linked_invoice_numbers,
+            )
+        except (OSError, RuntimeError) as e:
+            messagebox.showerror("Export Excel", f"Échec de l'export :\n{e}")
+            return
+
+        messagebox.showinfo(
+            "Export Excel",
+            f"{len(docs)} ligne(s) exportée(s) :\n{target_path}"
+        )
+
+    def export_quotes_excel(self):
+        """Export the currently visible/filtered quotes to an .xlsx file."""
+        self._export_excel(is_invoice=False)
+
+    def export_invoices_excel(self):
+        """Export the currently visible/filtered invoices to an .xlsx file."""
+        self._export_excel(is_invoice=True)
     
     def run(self):
         """Run the application"""

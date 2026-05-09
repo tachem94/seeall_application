@@ -23,6 +23,8 @@ python-docx>=1.1.0
 # - tkinter
 # - sqlite3
 
+# Excel export (.xlsx)
+openpyxl>=3.1.0
+
 # Optional dependencies for enhanced functionality
-# openpyxl>=3.1.0  # For Excel export if needed later
 # Pillow>=10.0.0   # For image handling in documents if needed later
