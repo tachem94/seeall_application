@@ -1180,9 +1180,23 @@ class MainApplication:
         window_title = UI_CONFIG.get('window_title', 'SEE ALL AVKN - Gestion Devis & Factures')
         window_size = UI_CONFIG.get('window_size', '1200x800')
         theme = UI_CONFIG.get('theme', 'clam')
-        
+
         self.root.title(window_title)
-        self.root.geometry(window_size)
+
+        # Adjust window to fit the user's screen.
+        # On Windows the native maximized state ('zoomed') keeps the taskbar visible.
+        # On other platforms we fall back to a geometry covering the available screen.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_w}x{screen_h}+0+0")
+        self.root.minsize(1024, 700)
+        try:
+            self.root.state('zoomed')
+        except tk.TclError:
+            try:
+                self.root.attributes('-zoomed', True)
+            except tk.TclError:
+                pass
         
         # Style configuration
         style = ttk.Style()
@@ -1305,22 +1319,34 @@ class MainApplication:
         # Load clients
         self.refresh_clients_list()
     
+    # Column type hints used by the sorting helper.
+    # 'price' parses "123.45 €", 'date' parses "dd/mm/yyyy".
+    QUOTES_COLUMN_TYPES = {
+        'Numéro': 'text', 'Client': 'text', 'Typologie': 'text', 'Date': 'date',
+        'Sites': 'text', 'Total HT': 'price', 'Total TTC': 'price',
+        'Facturé': 'text', 'Actions': 'text',
+    }
+    INVOICES_COLUMN_TYPES = {
+        'Numéro Facture': 'text', 'Bon de Commande': 'text', 'Client': 'text',
+        'Date': 'date', 'Sites': 'text', 'Total HT': 'price', 'Total TTC': 'price',
+    }
+
     def setup_quotes_tab(self):
         """Setup quotes management tab"""
         # Title
         title_label = ttk.Label(self.quotes_frame, text="Gestion des Devis", font=('Arial', 16, 'bold'))
         title_label.pack(pady=10)
-        
+
         # New quote button
         buttons_frame = ttk.Frame(self.quotes_frame)
         buttons_frame.pack(pady=5)
-        
+
         new_quote_button = ttk.Button(buttons_frame, text="Nouveau Devis", command=self.new_quote)
         new_quote_button.pack(side='left', padx=(0, 10))
-        
+
         delete_quote_button = ttk.Button(buttons_frame, text="Supprimer Devis", command=self.delete_selected_quote)
         delete_quote_button.pack(side='left')
-        
+
         # Quotes list
         list_frame = ttk.LabelFrame(self.quotes_frame, text="Devis existants", padding=10)
         list_frame.pack(fill='both', expand=True, padx=10, pady=5)
@@ -1333,16 +1359,35 @@ class MainApplication:
         self.quotes_search_var = tk.StringVar()
         quotes_search_entry = ttk.Entry(search_frame, textvariable=self.quotes_search_var)
         quotes_search_entry.pack(side='left', fill='x', expand=True, padx=(5, 5))
+
+        ttk.Label(search_frame, text="Du:").pack(side='left', padx=(10, 2))
+        self.quotes_date_from_var = tk.StringVar()
+        quotes_date_from = ttk.Entry(search_frame, textvariable=self.quotes_date_from_var, width=12)
+        quotes_date_from.pack(side='left')
+        ttk.Label(search_frame, text="Au:").pack(side='left', padx=(5, 2))
+        self.quotes_date_to_var = tk.StringVar()
+        quotes_date_to = ttk.Entry(search_frame, textvariable=self.quotes_date_to_var, width=12)
+        quotes_date_to.pack(side='left')
+        ttk.Label(search_frame, text="(JJ/MM/AAAA)", foreground='gray').pack(side='left', padx=(2, 5))
+
         ttk.Button(search_frame, text="Filtrer", command=self.apply_quotes_filter).pack(side='left')
         ttk.Button(search_frame, text="Réinitialiser", command=self.reset_quotes_filter).pack(side='left', padx=(5, 0))
         quotes_search_entry.bind('<Return>', lambda event: self.apply_quotes_filter())
-        
+        quotes_date_from.bind('<Return>', lambda event: self.apply_quotes_filter())
+        quotes_date_to.bind('<Return>', lambda event: self.apply_quotes_filter())
+
         # Treeview for quotes list
         columns = ('Numéro', 'Client', 'Typologie', 'Date', 'Sites', 'Total HT', 'Total TTC', 'Facturé', 'Actions')
         self.quotes_tree = ttk.Treeview(list_frame, columns=columns, show='headings')
-        
+        self.quotes_sort_state = {'column': None, 'reverse': False}
+
         for col in columns:
-            self.quotes_tree.heading(col, text=col)
+            self.quotes_tree.heading(
+                col, text=col,
+                command=lambda c=col: self._sort_treeview(self.quotes_tree, c,
+                                                          self.QUOTES_COLUMN_TYPES,
+                                                          self.quotes_sort_state)
+            )
             if col == 'Facturé':
                 self.quotes_tree.column(col, width=80)
             elif col == 'Sites':
@@ -1351,13 +1396,18 @@ class MainApplication:
                 self.quotes_tree.column(col, width=80)
             else:
                 self.quotes_tree.column(col, width=150)
-        
+
         # Scrollbar
         scrollbar_quotes = ttk.Scrollbar(list_frame, orient='vertical', command=self.quotes_tree.yview)
         self.quotes_tree.configure(yscrollcommand=scrollbar_quotes.set)
-        
+
         self.quotes_tree.pack(side='left', fill='both', expand=True)
         scrollbar_quotes.pack(side='right', fill='y')
+
+        # Totals footer (HT / TTC over the visible/filtered rows)
+        self.quotes_totals_var = tk.StringVar(value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 devis)")
+        ttk.Label(self.quotes_frame, textvariable=self.quotes_totals_var,
+                  font=('Arial', 11, 'bold')).pack(anchor='e', padx=20, pady=(0, 8))
         
         # Bind double-click to open quote
         self.quotes_tree.bind('<Double-1>', self.view_quote)
@@ -1407,27 +1457,51 @@ class MainApplication:
         self.invoices_search_var = tk.StringVar()
         invoices_search_entry = ttk.Entry(invoices_search_frame, textvariable=self.invoices_search_var)
         invoices_search_entry.pack(side='left', fill='x', expand=True, padx=(5, 5))
+
+        ttk.Label(invoices_search_frame, text="Du:").pack(side='left', padx=(10, 2))
+        self.invoices_date_from_var = tk.StringVar()
+        invoices_date_from = ttk.Entry(invoices_search_frame, textvariable=self.invoices_date_from_var, width=12)
+        invoices_date_from.pack(side='left')
+        ttk.Label(invoices_search_frame, text="Au:").pack(side='left', padx=(5, 2))
+        self.invoices_date_to_var = tk.StringVar()
+        invoices_date_to = ttk.Entry(invoices_search_frame, textvariable=self.invoices_date_to_var, width=12)
+        invoices_date_to.pack(side='left')
+        ttk.Label(invoices_search_frame, text="(JJ/MM/AAAA)", foreground='gray').pack(side='left', padx=(2, 5))
+
         ttk.Button(invoices_search_frame, text="Filtrer", command=self.apply_invoices_filter).pack(side='left')
         ttk.Button(invoices_search_frame, text="Réinitialiser", command=self.reset_invoices_filter).pack(side='left', padx=(5, 0))
         invoices_search_entry.bind('<Return>', lambda event: self.apply_invoices_filter())
-        
+        invoices_date_from.bind('<Return>', lambda event: self.apply_invoices_filter())
+        invoices_date_to.bind('<Return>', lambda event: self.apply_invoices_filter())
+
         # Treeview for invoices list
         columns = ('Numéro Facture', 'Bon de Commande', 'Client', 'Date', 'Sites', 'Total HT', 'Total TTC')
         self.invoices_tree = ttk.Treeview(list_frame, columns=columns, show='headings')
-        
+        self.invoices_sort_state = {'column': None, 'reverse': False}
+
         for col in columns:
-            self.invoices_tree.heading(col, text=col)
+            self.invoices_tree.heading(
+                col, text=col,
+                command=lambda c=col: self._sort_treeview(self.invoices_tree, c,
+                                                          self.INVOICES_COLUMN_TYPES,
+                                                          self.invoices_sort_state)
+            )
             if col == 'Sites':
                 self.invoices_tree.column(col, width=120)
             else:
                 self.invoices_tree.column(col, width=150)
-        
+
         # Scrollbar
         scrollbar_invoices = ttk.Scrollbar(list_frame, orient='vertical', command=self.invoices_tree.yview)
         self.invoices_tree.configure(yscrollcommand=scrollbar_invoices.set)
-        
+
         self.invoices_tree.pack(side='left', fill='both', expand=True)
         scrollbar_invoices.pack(side='right', fill='y')
+
+        # Totals footer (HT / TTC over the visible/filtered rows)
+        self.invoices_totals_var = tk.StringVar(value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 factures)")
+        ttk.Label(self.invoices_frame, textvariable=self.invoices_totals_var,
+                  font=('Arial', 11, 'bold')).pack(anchor='e', padx=20, pady=(0, 8))
         
         # Bind single-click to handle Sites column clicks
         self.invoices_tree.bind('<Button-1>', self.on_invoices_tree_click)
@@ -1623,20 +1697,124 @@ class MainApplication:
                 client.phone or ""
             ))
     
+    # ---------- Sorting / filtering helpers ----------
+
+    @staticmethod
+    def _parse_price(value):
+        """Parse '123.45 €' (or '1 234,56 €') into a float; return -inf on failure."""
+        if value is None:
+            return float('-inf')
+        cleaned = str(value).replace('€', '').replace(' ', '').replace(' ', '').strip()
+        cleaned = cleaned.replace(',', '.')
+        try:
+            return float(cleaned)
+        except ValueError:
+            return float('-inf')
+
+    @staticmethod
+    def _parse_date_ddmmyyyy(value):
+        """Parse 'dd/mm/yyyy' into a date; return date.min on failure."""
+        if not value:
+            return datetime.date.min
+        try:
+            return datetime.datetime.strptime(str(value).strip(), '%d/%m/%Y').date()
+        except (ValueError, TypeError):
+            return datetime.date.min
+
+    def _sort_treeview(self, tree, column, type_map, sort_state):
+        """Sort a Treeview by the clicked column header (toggles asc/desc)."""
+        col_type = type_map.get(column, 'text')
+        if sort_state.get('column') == column:
+            sort_state['reverse'] = not sort_state.get('reverse', False)
+        else:
+            sort_state['column'] = column
+            sort_state['reverse'] = False
+        reverse = sort_state['reverse']
+
+        items = [(tree.set(iid, column), iid) for iid in tree.get_children('')]
+
+        if col_type == 'price':
+            key_fn = lambda pair: self._parse_price(pair[0])
+        elif col_type == 'date':
+            key_fn = lambda pair: self._parse_date_ddmmyyyy(pair[0])
+        else:
+            key_fn = lambda pair: str(pair[0]).lower()
+
+        items.sort(key=key_fn, reverse=reverse)
+        for index, (_, iid) in enumerate(items):
+            tree.move(iid, '', index)
+
+        # Update header indicators (▲ / ▼)
+        for col in type_map.keys():
+            text = col
+            if col == column:
+                text = f"{col} {'▼' if reverse else '▲'}"
+            tree.heading(col, text=text)
+
+    def _reapply_sort(self, tree, type_map, sort_state):
+        """Re-apply the current sort after the tree has been repopulated."""
+        col = sort_state.get('column')
+        if not col:
+            return
+        # _sort_treeview toggles, so flip first to keep the same direction.
+        sort_state['reverse'] = not sort_state.get('reverse', False)
+        self._sort_treeview(tree, col, type_map, sort_state)
+
+    def _date_in_range(self, d, date_from, date_to):
+        """Return True if d (date or None) is within [date_from, date_to] (both optional)."""
+        if d is None:
+            return not date_from and not date_to
+        if date_from and d < date_from:
+            return False
+        if date_to and d > date_to:
+            return False
+        return True
+
+    @staticmethod
+    def _parse_date_ddmmyyyy_strict(value):
+        """Parse 'dd/mm/yyyy'. Returns (date_or_None, ok).
+        Empty input → (None, True). Invalid input (e.g. '31/04/2026') → (None, False)."""
+        s = str(value or '').strip()
+        if not s:
+            return (None, True)
+        try:
+            return (datetime.datetime.strptime(s, '%d/%m/%Y').date(), True)
+        except (ValueError, TypeError):
+            return (None, False)
+
+    def _get_date_range(self, from_var, to_var):
+        """Read 'Du'/'Au' StringVars; return (date_from, date_to, invalid_fields).
+        invalid_fields is a list of field labels ('Du'/'Au') with unparseable values."""
+        df, ok_from = self._parse_date_ddmmyyyy_strict(from_var.get())
+        dt, ok_to = self._parse_date_ddmmyyyy_strict(to_var.get())
+        invalid = []
+        if not ok_from:
+            invalid.append('Du')
+        if not ok_to:
+            invalid.append('Au')
+        return df, dt, invalid
+
     def refresh_quotes_list(self):
         """Refresh the quotes list display"""
         # Clear existing items
         for item in self.quotes_tree.get_children():
             self.quotes_tree.delete(item)
-        
+
         # Load quotes from database
         quotes = self.db.get_quotes(is_invoice=False)
         search_text = ""
         if hasattr(self, 'quotes_search_var'):
             search_text = self.quotes_search_var.get().strip().lower()
+        date_from, date_to = (None, None)
+        if hasattr(self, 'quotes_date_from_var'):
+            date_from, date_to, _ = self._get_date_range(self.quotes_date_from_var, self.quotes_date_to_var)
         linked_invoices = {}
         if search_text:
             linked_invoices = {inv.id: inv for inv in self.db.get_quotes(is_invoice=True)}
+
+        total_ht = 0.0
+        total_ttc = 0.0
+        visible_count = 0
         for quote in quotes:
             client_name = quote.client.name if quote.client else "Client inconnu"
             
@@ -1684,7 +1862,13 @@ class MainApplication:
                 ]
                 if not any(search_text in str(field).lower() for field in searchable_fields if field):
                     continue
-            
+
+            # Date period filter (uses quote_date when available, else created_at)
+            if date_from or date_to:
+                row_date = quote.quote_date or (quote.created_at.date() if quote.created_at else None)
+                if not self._date_in_range(row_date, date_from, date_to):
+                    continue
+
             item_id = self.quotes_tree.insert('', 'end', values=(
                 quote.number,
                 client_name,
@@ -1696,25 +1880,46 @@ class MainApplication:
                 invoice_status,
                 action_text
             ), tags=(str(quote.id), 'invoiced' if quote.is_invoiced else 'not_invoiced'))
-            
+
+            total_ht += quote.total_ht or 0.0
+            total_ttc += quote.total_ttc or 0.0
+            visible_count += 1
+
         # Configure styling for invoiced and non-invoiced items
         self.quotes_tree.tag_configure('invoiced', background='#e8f5e8')
         self.quotes_tree.tag_configure('not_invoiced', background='white')
+
+        # Update totals footer
+        if hasattr(self, 'quotes_totals_var'):
+            self.quotes_totals_var.set(
+                f"Total HT: {total_ht:.2f} €    Total TTC: {total_ttc:.2f} €    ({visible_count} devis)"
+            )
+
+        # Re-apply current sort if any
+        if hasattr(self, 'quotes_sort_state'):
+            self._reapply_sort(self.quotes_tree, self.QUOTES_COLUMN_TYPES, self.quotes_sort_state)
     
     def refresh_invoices_list(self):
         """Refresh the invoices list display"""
         # Clear existing items
         for item in self.invoices_tree.get_children():
             self.invoices_tree.delete(item)
-        
+
         # Load invoices from database
         invoices = self.db.get_quotes(is_invoice=True)
         search_text = ""
         if hasattr(self, 'invoices_search_var'):
             search_text = self.invoices_search_var.get().strip().lower()
+        date_from, date_to = (None, None)
+        if hasattr(self, 'invoices_date_from_var'):
+            date_from, date_to, _ = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+
+        total_ht = 0.0
+        total_ttc = 0.0
+        visible_count = 0
         for invoice in invoices:
             client_name = invoice.client.name if invoice.client else "Client inconnu"
-            
+
             # Use intervention_date if available for invoices, otherwise fall back to created_at
             if invoice.intervention_date:
                 date_str = invoice.intervention_date.strftime("%d/%m/%Y")
@@ -1722,7 +1927,7 @@ class MainApplication:
                 date_str = invoice.created_at.strftime("%d/%m/%Y")
             else:
                 date_str = ""
-            
+
             if search_text:
                 searchable_fields = [
                     invoice.invoice_number or "",
@@ -1735,7 +1940,13 @@ class MainApplication:
                 ]
                 if not any(search_text in str(field).lower() for field in searchable_fields if field):
                     continue
-            
+
+            # Date period filter (intervention_date preferred, else created_at)
+            if date_from or date_to:
+                row_date = invoice.intervention_date or (invoice.created_at.date() if invoice.created_at else None)
+                if not self._date_in_range(row_date, date_from, date_to):
+                    continue
+
             self.invoices_tree.insert('', 'end', values=(
                 invoice.invoice_number or "N/A",
                 invoice.order_number or "N/A",
@@ -1745,25 +1956,65 @@ class MainApplication:
                 f"{invoice.total_ht:.2f} €",
                 f"{invoice.total_ttc:.2f} €"
             ), tags=(str(invoice.id),))
+
+            total_ht += invoice.total_ht or 0.0
+            total_ttc += invoice.total_ttc or 0.0
+            visible_count += 1
+
+        # Update totals footer
+        if hasattr(self, 'invoices_totals_var'):
+            self.invoices_totals_var.set(
+                f"Total HT: {total_ht:.2f} €    Total TTC: {total_ttc:.2f} €    ({visible_count} factures)"
+            )
+
+        # Re-apply current sort if any
+        if hasattr(self, 'invoices_sort_state'):
+            self._reapply_sort(self.invoices_tree, self.INVOICES_COLUMN_TYPES, self.invoices_sort_state)
     
     def apply_quotes_filter(self, event=None):
-        """Apply search filter to quotes"""
+        """Apply search filter to quotes (with strict date-range validation)."""
+        if hasattr(self, 'quotes_date_from_var'):
+            _, _, invalid = self._get_date_range(self.quotes_date_from_var, self.quotes_date_to_var)
+            if invalid:
+                messagebox.showerror(
+                    "Date invalide",
+                    f"Le(s) champ(s) {', '.join(invalid)} contienne(nt) une date inexistante "
+                    f"ou un format incorrect.\nFormat attendu : JJ/MM/AAAA (ex. 30/04/2026)."
+                )
+                return
         self.refresh_quotes_list()
 
     def reset_quotes_filter(self):
-        """Reset quotes search filter"""
+        """Reset quotes search filter (text + date range)"""
         if hasattr(self, 'quotes_search_var'):
             self.quotes_search_var.set("")
+        if hasattr(self, 'quotes_date_from_var'):
+            self.quotes_date_from_var.set("")
+        if hasattr(self, 'quotes_date_to_var'):
+            self.quotes_date_to_var.set("")
         self.refresh_quotes_list()
 
     def apply_invoices_filter(self, event=None):
-        """Apply search filter to invoices"""
+        """Apply search filter to invoices (with strict date-range validation)."""
+        if hasattr(self, 'invoices_date_from_var'):
+            _, _, invalid = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+            if invalid:
+                messagebox.showerror(
+                    "Date invalide",
+                    f"Le(s) champ(s) {', '.join(invalid)} contienne(nt) une date inexistante "
+                    f"ou un format incorrect.\nFormat attendu : JJ/MM/AAAA (ex. 30/04/2026)."
+                )
+                return
         self.refresh_invoices_list()
 
     def reset_invoices_filter(self):
-        """Reset invoices search filter"""
+        """Reset invoices search filter (text + date range)"""
         if hasattr(self, 'invoices_search_var'):
             self.invoices_search_var.set("")
+        if hasattr(self, 'invoices_date_from_var'):
+            self.invoices_date_from_var.set("")
+        if hasattr(self, 'invoices_date_to_var'):
+            self.invoices_date_to_var.set("")
         self.refresh_invoices_list()
 
     def new_quote(self):
