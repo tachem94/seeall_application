@@ -44,6 +44,16 @@ except ImportError:
     DOCX_AVAILABLE = False
     print("Warning: python-docx not installed. Word export will not be available.")
 
+# Excel export imports
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    print("Warning: openpyxl not installed. Excel export will not be available.")
+
 # Import configuration
 try:
     from config import COMPANY_CONFIG, BUSINESS_CONFIG, UI_CONFIG, DATABASE_CONFIG
@@ -1200,6 +1210,179 @@ class WordGenerator:
         # Save document
         doc.save(filepath)
 
+def export_quotes_to_excel(
+    quotes: 'List[Quote]',
+    file_path: str,
+    is_invoice: bool = False,
+    linked_invoice_numbers: 'Optional[Dict[int, str]]' = None,
+) -> None:
+    """Write a list of Quote objects to an .xlsx workbook.
+
+    Two sheets are produced: a header sheet (one row per quote/invoice with
+    every meaningful field) and a 'Sites' sheet (one row per site, joined to
+    its parent via the document number). Numeric columns use real Excel
+    numbers/dates so totals can be summed in pivot tables.
+
+    For the quotes sheet, the optional ``linked_invoice_numbers`` mapping
+    (linked_invoice_id → invoice_number) is used to fill the 'Numéro facture
+    liée' column. If absent, that cell stays empty.
+    """
+    if not EXCEL_AVAILABLE:
+        raise RuntimeError("openpyxl is not installed")
+    linked_invoice_numbers = linked_invoice_numbers or {}
+
+    wb = Workbook()
+    main_ws = wb.active
+    main_ws.title = "Factures" if is_invoice else "Devis"
+
+    header_fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid") if is_invoice \
+        else PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    if is_invoice:
+        columns = [
+            ("Numéro Facture", lambda q: q.invoice_number or q.number or ""),
+            ("Bon de commande", lambda q: q.order_number or ""),
+            ("Client", lambda q: q.client.name if q.client else ""),
+            ("SIRET client", lambda q: q.client.siret if q.client else ""),
+            ("Email client", lambda q: q.client.email if q.client else ""),
+            ("Téléphone client", lambda q: q.client.phone if q.client else ""),
+            ("Adresse client", lambda q: q.client.address if q.client else ""),
+            ("Typologie", lambda q: q.typology or ""),
+            ("Date d'intervention", lambda q: q.intervention_date or (q.created_at.date() if q.created_at else None)),
+            ("Sites", lambda q: q.site_numbers_display or ""),
+            ("Nombre de sites", lambda q: len(q.sites)),
+            ("Total HT", lambda q: float(q.total_ht or 0.0)),
+            ("Total TVA", lambda q: float(q.total_tva or 0.0)),
+            ("Total TTC", lambda q: float(q.total_ttc or 0.0)),
+            ("Payée", lambda q: "Oui" if q.is_paid else "Non"),
+            ("Date de création", lambda q: q.created_at if q.created_at else None),
+        ]
+    else:
+        columns = [
+            ("Numéro", lambda q: q.number or ""),
+            ("Client", lambda q: q.client.name if q.client else ""),
+            ("SIRET client", lambda q: q.client.siret if q.client else ""),
+            ("Email client", lambda q: q.client.email if q.client else ""),
+            ("Téléphone client", lambda q: q.client.phone if q.client else ""),
+            ("Adresse client", lambda q: q.client.address if q.client else ""),
+            ("Typologie", lambda q: q.typology or ""),
+            ("Date du devis", lambda q: q.quote_date or (q.created_at.date() if q.created_at else None)),
+            ("Date d'intervention", lambda q: q.intervention_date),
+            ("Sites", lambda q: q.site_numbers_display or ""),
+            ("Nombre de sites", lambda q: len(q.sites)),
+            ("Total HT", lambda q: float(q.total_ht or 0.0)),
+            ("Total TVA", lambda q: float(q.total_tva or 0.0)),
+            ("Total TTC", lambda q: float(q.total_ttc or 0.0)),
+            ("Facturé", lambda q: "Oui" if q.is_invoiced else "Non"),
+            ("Numéro facture liée",
+             lambda q: linked_invoice_numbers.get(q.linked_invoice_id, "") if q.linked_invoice_id else ""),
+            ("Date de création", lambda q: q.created_at if q.created_at else None),
+        ]
+
+    main_ws.append([label for label, _ in columns])
+    for col_idx in range(1, len(columns) + 1):
+        cell = main_ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    money_format = '#,##0.00\\ €'
+    date_format = 'DD/MM/YYYY'
+    datetime_format = 'DD/MM/YYYY HH:MM'
+
+    for q in quotes:
+        row_values = [getter(q) for _, getter in columns]
+        main_ws.append(row_values)
+        excel_row = main_ws.max_row
+        for idx, (label, _) in enumerate(columns, start=1):
+            cell = main_ws.cell(row=excel_row, column=idx)
+            if label in ("Total HT", "Total TVA", "Total TTC"):
+                cell.number_format = money_format
+            elif label in ("Date du devis", "Date d'intervention"):
+                cell.number_format = date_format
+            elif label == "Date de création":
+                cell.number_format = datetime_format
+        # Color the row green if the invoice is paid, to mirror the in-app UI.
+        if is_invoice and q.is_paid:
+            paid_fill = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid")
+            for idx in range(1, len(columns) + 1):
+                main_ws.cell(row=excel_row, column=idx).fill = paid_fill
+
+    main_ws.freeze_panes = "A2"
+
+    # Auto-size columns based on the longest cell content (capped to keep the
+    # workbook readable on narrow screens).
+    for col_idx, (label, _) in enumerate(columns, start=1):
+        letter = get_column_letter(col_idx)
+        max_len = len(label)
+        for cell in main_ws[letter][1:]:
+            value = cell.value
+            if value is None:
+                continue
+            text = value.strftime("%d/%m/%Y %H:%M") if isinstance(value, datetime.datetime) \
+                else value.strftime("%d/%m/%Y") if isinstance(value, datetime.date) \
+                else str(value)
+            if len(text) > max_len:
+                max_len = len(text)
+        main_ws.column_dimensions[letter].width = min(max_len + 2, 50)
+
+    # Sites detail sheet — one row per site, joined to its parent document.
+    sites_ws = wb.create_sheet(title="Sites détaillés")
+    site_columns = [
+        "Numéro document",
+        "Client",
+        "Numéro site",
+        "Adresse",
+        "Code postal",
+        "Ville",
+        "Latitude",
+        "Longitude",
+        "Description",
+        "Prix HT",
+    ]
+    sites_ws.append(site_columns)
+    for col_idx in range(1, len(site_columns) + 1):
+        cell = sites_ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    for q in quotes:
+        doc_number = (q.invoice_number if is_invoice else q.number) or q.number or ""
+        client_name = q.client.name if q.client else ""
+        for site in q.sites:
+            sites_ws.append([
+                doc_number,
+                client_name,
+                site.site_number or "",
+                site.address or "",
+                site.postal_code or "",
+                site.city or "",
+                site.latitude or "",
+                site.longitude or "",
+                site.description or "",
+                float(site.price_ht or 0.0),
+            ])
+            sites_ws.cell(row=sites_ws.max_row, column=len(site_columns)).number_format = money_format
+
+    sites_ws.freeze_panes = "A2"
+    for col_idx, label in enumerate(site_columns, start=1):
+        letter = get_column_letter(col_idx)
+        max_len = len(label)
+        for cell in sites_ws[letter][1:]:
+            value = cell.value
+            if value is None:
+                continue
+            text = str(value)
+            if len(text) > max_len:
+                max_len = len(text)
+        sites_ws.column_dimensions[letter].width = min(max_len + 2, 50)
+
+    wb.save(file_path)
+
+
 class BackupManager:
     """Copy the SQLite database to a backup folder and rotate old backups.
 
@@ -1522,6 +1705,9 @@ class MainApplication:
         delete_quote_button = ttk.Button(buttons_frame, text="Supprimer Devis", command=self.delete_selected_quote)
         delete_quote_button.pack(side='left')
 
+        ttk.Button(buttons_frame, text="Exporter Excel",
+                   command=self.export_quotes_excel).pack(side='left', padx=(10, 0))
+
         # Quotes list
         list_frame = ttk.LabelFrame(self.quotes_frame, text="Devis existants", padding=10)
         list_frame.pack(fill='both', expand=True, padx=10, pady=5)
@@ -1617,8 +1803,11 @@ class MainApplication:
         invoices_buttons_frame = ttk.Frame(self.invoices_frame)
         invoices_buttons_frame.pack(pady=5)
         
-        ttk.Button(invoices_buttons_frame, text="Supprimer Facture", 
+        ttk.Button(invoices_buttons_frame, text="Supprimer Facture",
                   command=self.delete_selected_invoice).pack(side='left')
+
+        ttk.Button(invoices_buttons_frame, text="Exporter Excel",
+                   command=self.export_invoices_excel).pack(side='left', padx=(10, 0))
         
         # Invoices list
         list_frame = ttk.LabelFrame(self.invoices_frame, text="Factures existantes", padding=10)
@@ -2753,6 +2942,94 @@ class MainApplication:
             messagebox.showerror("Erreur", "La mise à jour du statut de paiement a échoué.")
             return
         self.refresh_invoices_list()
+
+    # ---------- Excel export ----------
+
+    def _visible_doc_ids(self, tree) -> 'List[int]':
+        """Return the IDs (in display order) of the rows currently visible in tree."""
+        ids: List[int] = []
+        for iid in tree.get_children(''):
+            tags = tree.item(iid, 'tags')
+            if not tags:
+                continue
+            try:
+                ids.append(int(tags[0]))
+            except (ValueError, TypeError):
+                continue
+        return ids
+
+    def _export_excel(self, *, is_invoice: bool):
+        """Shared Excel-export flow for the Devis and Factures tabs."""
+        if not EXCEL_AVAILABLE:
+            messagebox.showerror(
+                "Export Excel indisponible",
+                "Le module openpyxl n'est pas installé.\n\n"
+                "Installez-le avec :\n    pip install openpyxl"
+            )
+            return
+
+        tree = self.invoices_tree if is_invoice else self.quotes_tree
+        visible_ids = self._visible_doc_ids(tree)
+        if not visible_ids:
+            messagebox.showinfo(
+                "Export Excel",
+                "Aucune ligne à exporter (la liste est vide ou entièrement filtrée)."
+            )
+            return
+
+        # Re-fetch from DB so the export reflects the latest persisted state,
+        # not stale tree data, and order matches what the user sees.
+        all_docs = self.db.get_quotes(is_invoice=is_invoice)
+        by_id = {doc.id: doc for doc in all_docs}
+        docs = [by_id[i] for i in visible_ids if i in by_id]
+        if not docs:
+            messagebox.showinfo(
+                "Export Excel",
+                "Aucune ligne à exporter (les lignes visibles n'ont pas été retrouvées en base)."
+            )
+            return
+
+        # Lookup of linked invoice numbers — only relevant for the quotes export.
+        linked_invoice_numbers: Dict[int, str] = {}
+        if not is_invoice:
+            invoices = self.db.get_quotes(is_invoice=True)
+            linked_invoice_numbers = {
+                inv.id: (inv.invoice_number or inv.number or "")
+                for inv in invoices
+            }
+
+        default_name = ("factures" if is_invoice else "devis") + \
+            f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        target_path = filedialog.asksaveasfilename(
+            title=f"Exporter les {'factures' if is_invoice else 'devis'} au format Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Classeur Excel", "*.xlsx"), ("Tous les fichiers", "*.*")],
+        )
+        if not target_path:
+            return  # user cancelled
+
+        try:
+            export_quotes_to_excel(
+                docs, target_path, is_invoice=is_invoice,
+                linked_invoice_numbers=linked_invoice_numbers,
+            )
+        except (OSError, RuntimeError) as e:
+            messagebox.showerror("Export Excel", f"Échec de l'export :\n{e}")
+            return
+
+        messagebox.showinfo(
+            "Export Excel",
+            f"{len(docs)} ligne(s) exportée(s) :\n{target_path}"
+        )
+
+    def export_quotes_excel(self):
+        """Export the currently visible/filtered quotes to an .xlsx file."""
+        self._export_excel(is_invoice=False)
+
+    def export_invoices_excel(self):
+        """Export the currently visible/filtered invoices to an .xlsx file."""
+        self._export_excel(is_invoice=True)
     
     def run(self):
         """Run the application"""
