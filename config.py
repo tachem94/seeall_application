@@ -149,14 +149,20 @@ MESSAGES_CONFIG = {
 DATABASE_CONFIG = {
     # Nom du fichier de base de données
     'database_filename': 'seeall_database.db',
-    
-    # Sauvegarde automatique (en minutes, 0 = désactivée)
-    'auto_backup_interval': 0,
-    
-    # Dossier de sauvegarde
-    'backup_folder': 'backups',
-    
-    # Nombre maximum de sauvegardes à conserver
+
+    # Sauvegarde automatique au démarrage de l'application
+    # (la DB est copiée AVANT toute opération, donc l'état pré-session est préservé)
+    'backup_on_startup': True,
+
+    # Dossier de sauvegarde — chemin absolu recommandé pour pointer vers
+    # un dossier synchronisé cloud (OneDrive / Google Drive / Dropbox).
+    # Exemples :
+    #   'backups'                                          (sous-dossier de l'app, local)
+    #   r'G:\My Drive\seeall\seeall_backups_db'           (Google Drive sync, recommandé)
+    #   r'C:\Users\xxx\OneDrive\seeall_backups_db'        (OneDrive sync)
+    'backup_folder': r'G:\My Drive\seeall\seeall_backups_db',
+
+    # Nombre maximum de sauvegardes à conserver (rotation FIFO)
     'max_backups': 10,
 }
 

@@ -1,1 +1,15 @@
 .claude/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite databases (data, never code) and their WAL/journal sidecars
+seeall_database.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local backups (user-specific, configurable in config.py)
+backups/

@@ -14,8 +14,9 @@ import sqlite3
 import datetime
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import uuid
 from xml.sax.saxutils import escape
 
@@ -45,7 +46,7 @@ except ImportError:
 
 # Import configuration
 try:
-    from config import COMPANY_CONFIG, BUSINESS_CONFIG, UI_CONFIG
+    from config import COMPANY_CONFIG, BUSINESS_CONFIG, UI_CONFIG, DATABASE_CONFIG
     CONFIG_AVAILABLE = True
 except ImportError:
     CONFIG_AVAILABLE = False
@@ -74,6 +75,12 @@ except ImportError:
         'window_title': 'SEE ALL AVKN - Gestion Devis & Factures',
         'window_size': '1200x800',
         'theme': 'clam'
+    }
+    DATABASE_CONFIG = {
+        'database_filename': 'seeall_database.db',
+        'backup_on_startup': True,
+        'backup_folder': 'backups',
+        'max_backups': 10,
     }
 
 @dataclass
@@ -1169,13 +1176,109 @@ class WordGenerator:
         # Save document
         doc.save(filepath)
 
+class BackupManager:
+    """Copy the SQLite database to a backup folder and rotate old backups.
+
+    The DB is copied with shutil.copy2 (preserves mtime). For a single-user
+    desktop app SQLite tolerates this fine when no transaction is in flight,
+    so we run startup backups BEFORE opening the DB connection.
+    """
+
+    BACKUP_PREFIX = 'seeall_database_'
+    BACKUP_SUFFIX = '.db'
+    TIMESTAMP_FMT = '%Y%m%d_%H%M%S'
+
+    def __init__(self, db_filename: str, backup_folder: str, max_backups: int = 10):
+        self.db_filename = db_filename
+        self.backup_folder = backup_folder
+        self.max_backups = max(1, int(max_backups))
+        self.last_backup_path: Optional[str] = None
+        self.last_backup_time: Optional[datetime.datetime] = None
+
+    def _ensure_folder(self) -> bool:
+        try:
+            os.makedirs(self.backup_folder, exist_ok=True)
+            return True
+        except OSError as e:
+            print(f"[backup] Cannot create folder '{self.backup_folder}': {e}")
+            return False
+
+    def _list_backups(self) -> List[str]:
+        if not os.path.isdir(self.backup_folder):
+            return []
+        files = [
+            os.path.join(self.backup_folder, f)
+            for f in os.listdir(self.backup_folder)
+            if f.startswith(self.BACKUP_PREFIX) and f.endswith(self.BACKUP_SUFFIX)
+        ]
+        # Filenames embed a sortable timestamp, so lexical sort = chronological sort.
+        files.sort()
+        return files
+
+    def _rotate(self) -> None:
+        backups = self._list_backups()
+        excess = len(backups) - self.max_backups
+        for path in backups[:max(0, excess)]:
+            try:
+                os.remove(path)
+            except OSError as e:
+                print(f"[backup] Could not delete old backup '{path}': {e}")
+
+    def create_backup(self) -> Tuple[bool, str]:
+        """Create a timestamped copy of the DB. Returns (success, message)."""
+        if not os.path.exists(self.db_filename):
+            return (False, f"Base de données introuvable : {self.db_filename}")
+        if not self._ensure_folder():
+            return (False, f"Dossier de sauvegarde inaccessible : {self.backup_folder}")
+        timestamp = datetime.datetime.now()
+        target_name = f"{self.BACKUP_PREFIX}{timestamp.strftime(self.TIMESTAMP_FMT)}{self.BACKUP_SUFFIX}"
+        target_path = os.path.join(self.backup_folder, target_name)
+        try:
+            shutil.copy2(self.db_filename, target_path)
+        except OSError as e:
+            return (False, f"Échec de la copie : {e}")
+        self.last_backup_path = target_path
+        self.last_backup_time = timestamp
+        self._rotate()
+        return (True, target_path)
+
+    def get_latest_backup_info(self) -> Optional[Tuple[str, datetime.datetime]]:
+        """Return (path, datetime) of the most recent existing backup, or None."""
+        backups = self._list_backups()
+        if not backups:
+            return None
+        latest = backups[-1]
+        # Extract timestamp from filename; fall back to file mtime.
+        basename = os.path.basename(latest)
+        ts_part = basename[len(self.BACKUP_PREFIX):-len(self.BACKUP_SUFFIX)]
+        try:
+            ts = datetime.datetime.strptime(ts_part, self.TIMESTAMP_FMT)
+        except ValueError:
+            ts = datetime.datetime.fromtimestamp(os.path.getmtime(latest))
+        return (latest, ts)
+
+
 class MainApplication:
     """Main application class with GUI"""
     
     def __init__(self):
+        # Backup manager: backup BEFORE opening the DB so the pre-session
+        # state is preserved even if the upcoming session corrupts the file.
+        db_filename = DATABASE_CONFIG.get('database_filename', 'seeall_database.db')
+        backup_folder = DATABASE_CONFIG.get('backup_folder', 'backups')
+        max_backups = DATABASE_CONFIG.get('max_backups', 10)
+        self.backup_manager = BackupManager(db_filename, backup_folder, max_backups)
+        if DATABASE_CONFIG.get('backup_on_startup', True):
+            ok, info = self.backup_manager.create_backup()
+            if ok:
+                print(f"[backup] Startup backup OK: {info}")
+            else:
+                # Don't block app startup on backup failure — just log.
+                print(f"[backup] Startup backup FAILED: {info}")
+
         self.db = DatabaseManager()
         self.root = tk.Tk()
-        
+
         # Use configuration for window settings
         window_title = UI_CONFIG.get('window_title', 'SEE ALL AVKN - Gestion Devis & Factures')
         window_size = UI_CONFIG.get('window_size', '1200x800')
@@ -1197,7 +1300,7 @@ class MainApplication:
                 self.root.attributes('-zoomed', True)
             except tk.TclError:
                 pass
-        
+
         # Style configuration
         style = ttk.Style()
         try:
@@ -1205,29 +1308,71 @@ class MainApplication:
         except tk.TclError:
             # Fallback theme if specified theme is not available
             style.theme_use('default')
-        
+
         self.setup_ui()
         
     def setup_ui(self):
         """Setup the user interface"""
+        # Status bar (bottom): backup status + manual backup button
+        # Packed first with side='bottom' so it always stays visible even if
+        # the notebook expands.
+        self._setup_backup_statusbar()
+
         # Create notebook for tabs
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill='both', expand=True, padx=10, pady=10)
-        
+
         # Clients tab
         self.clients_frame = ttk.Frame(notebook)
         notebook.add(self.clients_frame, text="Clients")
         self.setup_clients_tab()
-        
+
         # Quotes tab
         self.quotes_frame = ttk.Frame(notebook)
         notebook.add(self.quotes_frame, text="Devis")
         self.setup_quotes_tab()
-        
+
         # Invoices tab
         self.invoices_frame = ttk.Frame(notebook)
         notebook.add(self.invoices_frame, text="Factures")
         self.setup_invoices_tab()
+
+    def _setup_backup_statusbar(self):
+        """Bottom status bar showing last backup time + manual backup button."""
+        bar = ttk.Frame(self.root, relief='sunken', padding=(8, 4))
+        bar.pack(side='bottom', fill='x')
+
+        self.backup_status_var = tk.StringVar()
+        ttk.Label(bar, textvariable=self.backup_status_var).pack(side='left')
+
+        ttk.Button(bar, text="Sauvegarder maintenant",
+                   command=self.run_manual_backup).pack(side='right')
+
+        self._refresh_backup_status()
+
+    def _refresh_backup_status(self):
+        """Update the status-bar label based on the latest backup on disk."""
+        if not hasattr(self, 'backup_status_var'):
+            return
+        info = self.backup_manager.get_latest_backup_info()
+        if info is None:
+            self.backup_status_var.set(
+                f"Aucune sauvegarde dans {self.backup_manager.backup_folder}"
+            )
+            return
+        path, ts = info
+        self.backup_status_var.set(
+            f"Dernière sauvegarde : {ts.strftime('%d/%m/%Y %H:%M:%S')}  ({path})"
+        )
+
+    def run_manual_backup(self):
+        """Trigger an on-demand backup and report result via dialog."""
+        ok, info = self.backup_manager.create_backup()
+        self._refresh_backup_status()
+        if ok:
+            messagebox.showinfo("Sauvegarde", f"Sauvegarde créée :\n{info}")
+        else:
+            messagebox.showerror("Sauvegarde", f"Échec de la sauvegarde :\n{info}")
     
     def setup_clients_tab(self):
         """Setup clients management tab"""
