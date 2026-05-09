@@ -1501,6 +1501,11 @@ class MainApplication:
         'Payée': 'text',
     }
 
+    # Values used by the Factures État (paid status) filter combobox.
+    PAID_FILTER_ALL = 'Toutes'
+    PAID_FILTER_PAID = 'Payées'
+    PAID_FILTER_UNPAID = 'Non payées'
+
     def setup_quotes_tab(self):
         """Setup quotes management tab"""
         # Title
@@ -1638,6 +1643,16 @@ class MainApplication:
         invoices_date_to.pack(side='left')
         ttk.Label(invoices_search_frame, text="(JJ/MM/AAAA)", foreground='gray').pack(side='left', padx=(2, 5))
 
+        ttk.Label(invoices_search_frame, text="État:").pack(side='left', padx=(10, 2))
+        self.invoices_paid_filter_var = tk.StringVar(value=self.PAID_FILTER_ALL)
+        invoices_paid_filter = ttk.Combobox(
+            invoices_search_frame, textvariable=self.invoices_paid_filter_var,
+            values=[self.PAID_FILTER_ALL, self.PAID_FILTER_PAID, self.PAID_FILTER_UNPAID],
+            state='readonly', width=12,
+        )
+        invoices_paid_filter.pack(side='left', padx=(0, 5))
+        invoices_paid_filter.bind('<<ComboboxSelected>>', lambda event: self.apply_invoices_filter())
+
         ttk.Button(invoices_search_frame, text="Filtrer", command=self.apply_invoices_filter).pack(side='left')
         ttk.Button(invoices_search_frame, text="Réinitialiser", command=self.reset_invoices_filter).pack(side='left', padx=(5, 0))
         invoices_search_entry.bind('<Return>', lambda event: self.apply_invoices_filter())
@@ -1674,10 +1689,29 @@ class MainApplication:
         self.invoices_tree.pack(side='left', fill='both', expand=True)
         scrollbar_invoices.pack(side='right', fill='y')
 
-        # Totals footer (HT / TTC over the visible/filtered rows)
-        self.invoices_totals_var = tk.StringVar(value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 factures)")
-        ttk.Label(self.invoices_frame, textvariable=self.invoices_totals_var,
-                  font=('Arial', 11, 'bold')).pack(anchor='e', padx=20, pady=(0, 8))
+        # Totals footer over the currently visible/filtered rows: a stacked
+        # block with the grand total on top and the paid/unpaid breakdown
+        # below in green/red so the cash-flow split is readable at a glance.
+        invoices_totals_frame = ttk.Frame(self.invoices_frame)
+        invoices_totals_frame.pack(anchor='e', padx=20, pady=(0, 8), fill='x')
+
+        self.invoices_totals_var = tk.StringVar(
+            value="Total HT: 0.00 €    Total TTC: 0.00 €    (0 factures)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_totals_var,
+                  font=('Arial', 11, 'bold')).pack(anchor='e')
+
+        self.invoices_paid_totals_var = tk.StringVar(
+            value="Payées : 0.00 € HT  /  0.00 € TTC  (0)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_paid_totals_var,
+                  foreground='#2e7d32').pack(anchor='e')
+
+        self.invoices_unpaid_totals_var = tk.StringVar(
+            value="Non payées : 0.00 € HT  /  0.00 € TTC  (0)"
+        )
+        ttk.Label(invoices_totals_frame, textvariable=self.invoices_unpaid_totals_var,
+                  foreground='#c62828').pack(anchor='e')
         
         # Bind single-click to handle Sites column clicks
         self.invoices_tree.bind('<Button-1>', self.on_invoices_tree_click)
@@ -2094,10 +2128,19 @@ class MainApplication:
         date_from, date_to = (None, None)
         if hasattr(self, 'invoices_date_from_var'):
             date_from, date_to, _ = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+        paid_filter = self.PAID_FILTER_ALL
+        if hasattr(self, 'invoices_paid_filter_var'):
+            paid_filter = self.invoices_paid_filter_var.get() or self.PAID_FILTER_ALL
 
         total_ht = 0.0
         total_ttc = 0.0
         visible_count = 0
+        paid_ht = 0.0
+        paid_ttc = 0.0
+        paid_count = 0
+        unpaid_ht = 0.0
+        unpaid_ttc = 0.0
+        unpaid_count = 0
         for invoice in invoices:
             client_name = invoice.client.name if invoice.client else "Client inconnu"
 
@@ -2131,6 +2174,12 @@ class MainApplication:
                 if not self._date_in_range(row_date, date_from, date_to):
                     continue
 
+            # Paid status filter
+            if paid_filter == self.PAID_FILTER_PAID and not invoice.is_paid:
+                continue
+            if paid_filter == self.PAID_FILTER_UNPAID and invoice.is_paid:
+                continue
+
             self.invoices_tree.insert('', 'end', values=(
                 invoice.invoice_number or "N/A",
                 invoice.order_number or "N/A",
@@ -2142,14 +2191,32 @@ class MainApplication:
                 paid_label,
             ), tags=(str(invoice.id), 'paid' if invoice.is_paid else 'unpaid'))
 
-            total_ht += invoice.total_ht or 0.0
-            total_ttc += invoice.total_ttc or 0.0
+            row_ht = invoice.total_ht or 0.0
+            row_ttc = invoice.total_ttc or 0.0
+            total_ht += row_ht
+            total_ttc += row_ttc
             visible_count += 1
+            if invoice.is_paid:
+                paid_ht += row_ht
+                paid_ttc += row_ttc
+                paid_count += 1
+            else:
+                unpaid_ht += row_ht
+                unpaid_ttc += row_ttc
+                unpaid_count += 1
 
         # Update totals footer
         if hasattr(self, 'invoices_totals_var'):
             self.invoices_totals_var.set(
                 f"Total HT: {total_ht:.2f} €    Total TTC: {total_ttc:.2f} €    ({visible_count} factures)"
+            )
+        if hasattr(self, 'invoices_paid_totals_var'):
+            self.invoices_paid_totals_var.set(
+                f"Payées : {paid_ht:.2f} € HT  /  {paid_ttc:.2f} € TTC  ({paid_count})"
+            )
+        if hasattr(self, 'invoices_unpaid_totals_var'):
+            self.invoices_unpaid_totals_var.set(
+                f"Non payées : {unpaid_ht:.2f} € HT  /  {unpaid_ttc:.2f} € TTC  ({unpaid_count})"
             )
 
         # Re-apply current sort if any
@@ -2193,13 +2260,15 @@ class MainApplication:
         self.refresh_invoices_list()
 
     def reset_invoices_filter(self):
-        """Reset invoices search filter (text + date range)"""
+        """Reset invoices search filter (text + date range + paid status)"""
         if hasattr(self, 'invoices_search_var'):
             self.invoices_search_var.set("")
         if hasattr(self, 'invoices_date_from_var'):
             self.invoices_date_from_var.set("")
         if hasattr(self, 'invoices_date_to_var'):
             self.invoices_date_to_var.set("")
+        if hasattr(self, 'invoices_paid_filter_var'):
+            self.invoices_paid_filter_var.set(self.PAID_FILTER_ALL)
         self.refresh_invoices_list()
 
     def new_quote(self):
