@@ -1770,15 +1770,29 @@ class MainApplication:
             return False
         return True
 
+    @staticmethod
+    def _parse_date_ddmmyyyy_strict(value):
+        """Parse 'dd/mm/yyyy'. Returns (date_or_None, ok).
+        Empty input → (None, True). Invalid input (e.g. '31/04/2026') → (None, False)."""
+        s = str(value or '').strip()
+        if not s:
+            return (None, True)
+        try:
+            return (datetime.datetime.strptime(s, '%d/%m/%Y').date(), True)
+        except (ValueError, TypeError):
+            return (None, False)
+
     def _get_date_range(self, from_var, to_var):
-        """Read 'Du'/'Au' StringVars; return (date_from, date_to) or (None, None) if empty/invalid."""
-        date_from = self._parse_date_ddmmyyyy(from_var.get().strip()) if from_var.get().strip() else None
-        date_to = self._parse_date_ddmmyyyy(to_var.get().strip()) if to_var.get().strip() else None
-        if date_from == datetime.date.min:
-            date_from = None
-        if date_to == datetime.date.min:
-            date_to = None
-        return date_from, date_to
+        """Read 'Du'/'Au' StringVars; return (date_from, date_to, invalid_fields).
+        invalid_fields is a list of field labels ('Du'/'Au') with unparseable values."""
+        df, ok_from = self._parse_date_ddmmyyyy_strict(from_var.get())
+        dt, ok_to = self._parse_date_ddmmyyyy_strict(to_var.get())
+        invalid = []
+        if not ok_from:
+            invalid.append('Du')
+        if not ok_to:
+            invalid.append('Au')
+        return df, dt, invalid
 
     def refresh_quotes_list(self):
         """Refresh the quotes list display"""
@@ -1793,7 +1807,7 @@ class MainApplication:
             search_text = self.quotes_search_var.get().strip().lower()
         date_from, date_to = (None, None)
         if hasattr(self, 'quotes_date_from_var'):
-            date_from, date_to = self._get_date_range(self.quotes_date_from_var, self.quotes_date_to_var)
+            date_from, date_to, _ = self._get_date_range(self.quotes_date_from_var, self.quotes_date_to_var)
         linked_invoices = {}
         if search_text:
             linked_invoices = {inv.id: inv for inv in self.db.get_quotes(is_invoice=True)}
@@ -1898,7 +1912,7 @@ class MainApplication:
             search_text = self.invoices_search_var.get().strip().lower()
         date_from, date_to = (None, None)
         if hasattr(self, 'invoices_date_from_var'):
-            date_from, date_to = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+            date_from, date_to, _ = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
 
         total_ht = 0.0
         total_ttc = 0.0
@@ -1958,7 +1972,16 @@ class MainApplication:
             self._reapply_sort(self.invoices_tree, self.INVOICES_COLUMN_TYPES, self.invoices_sort_state)
     
     def apply_quotes_filter(self, event=None):
-        """Apply search filter to quotes"""
+        """Apply search filter to quotes (with strict date-range validation)."""
+        if hasattr(self, 'quotes_date_from_var'):
+            _, _, invalid = self._get_date_range(self.quotes_date_from_var, self.quotes_date_to_var)
+            if invalid:
+                messagebox.showerror(
+                    "Date invalide",
+                    f"Le(s) champ(s) {', '.join(invalid)} contienne(nt) une date inexistante "
+                    f"ou un format incorrect.\nFormat attendu : JJ/MM/AAAA (ex. 30/04/2026)."
+                )
+                return
         self.refresh_quotes_list()
 
     def reset_quotes_filter(self):
@@ -1972,7 +1995,16 @@ class MainApplication:
         self.refresh_quotes_list()
 
     def apply_invoices_filter(self, event=None):
-        """Apply search filter to invoices"""
+        """Apply search filter to invoices (with strict date-range validation)."""
+        if hasattr(self, 'invoices_date_from_var'):
+            _, _, invalid = self._get_date_range(self.invoices_date_from_var, self.invoices_date_to_var)
+            if invalid:
+                messagebox.showerror(
+                    "Date invalide",
+                    f"Le(s) champ(s) {', '.join(invalid)} contienne(nt) une date inexistante "
+                    f"ou un format incorrect.\nFormat attendu : JJ/MM/AAAA (ex. 30/04/2026)."
+                )
+                return
         self.refresh_invoices_list()
 
     def reset_invoices_filter(self):
