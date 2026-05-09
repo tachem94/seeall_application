@@ -162,6 +162,7 @@ class Quote:
     site_address: str = ""  # DEPRECATED - kept for migration compatibility
     is_invoiced: bool = False  # True if this quote has been converted to an invoice
     linked_invoice_id: Optional[int] = None  # ID of the corresponding invoice
+    is_paid: bool = False  # True when the invoice has been paid (only meaningful when is_invoice=True)
     
     @property
     def total_ht(self) -> float:
@@ -242,6 +243,7 @@ class DatabaseManager:
                     site_address TEXT,
                     is_invoiced BOOLEAN DEFAULT FALSE,
                     linked_invoice_id INTEGER,
+                    is_paid BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (client_id) REFERENCES clients (id),
                     FOREIGN KEY (linked_invoice_id) REFERENCES quotes (id)
@@ -344,6 +346,15 @@ class DatabaseManager:
                 conn.commit()
             except sqlite3.OperationalError:
                 # Columns already exist
+                pass
+
+            # Migration: Add is_paid column for invoice payment tracking
+            try:
+                cursor.execute("ALTER TABLE quotes ADD COLUMN is_paid BOOLEAN DEFAULT FALSE")
+                conn.commit()
+                print("Migration: Added is_paid column to quotes table")
+            except sqlite3.OperationalError:
+                # Column already exists, migration not needed
                 pass
             
             # Create new sites table if it doesn't exist
@@ -486,26 +497,27 @@ class DatabaseManager:
             if quote.id is None:
                 # Create new quote
                 cursor.execute('''
-                    INSERT INTO quotes (number, client_id, typology, quote_date, intervention_date, is_invoice, 
-                                      invoice_number, order_number, site_number, site_address, 
-                                      is_invoiced, linked_invoice_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (quote.number, quote.client_id, quote.typology, quote_date_str, intervention_date_str, 
-                      quote.is_invoice, quote.invoice_number, quote.order_number, 
-                      quote.site_number, quote.site_address, quote.is_invoiced, quote.linked_invoice_id))
-                
+                    INSERT INTO quotes (number, client_id, typology, quote_date, intervention_date, is_invoice,
+                                      invoice_number, order_number, site_number, site_address,
+                                      is_invoiced, linked_invoice_id, is_paid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (quote.number, quote.client_id, quote.typology, quote_date_str, intervention_date_str,
+                      quote.is_invoice, quote.invoice_number, quote.order_number,
+                      quote.site_number, quote.site_address, quote.is_invoiced, quote.linked_invoice_id,
+                      quote.is_paid))
+
                 quote_id = cursor.lastrowid
                 quote.id = quote_id  # Set the ID for the quote object
             else:
                 # Update existing quote
                 cursor.execute('''
-                    UPDATE quotes SET client_id=?, typology=?, quote_date=?, intervention_date=?, 
-                                    invoice_number=?, order_number=?, site_number=?, site_address=?, 
-                                    is_invoiced=?, linked_invoice_id=?
+                    UPDATE quotes SET client_id=?, typology=?, quote_date=?, intervention_date=?,
+                                    invoice_number=?, order_number=?, site_number=?, site_address=?,
+                                    is_invoiced=?, linked_invoice_id=?, is_paid=?
                     WHERE id=?
                 ''', (quote.client_id, quote.typology, quote_date_str, intervention_date_str,
                       quote.invoice_number, quote.order_number, quote.site_number, quote.site_address,
-                      quote.is_invoiced, quote.linked_invoice_id, quote.id))
+                      quote.is_invoiced, quote.linked_invoice_id, quote.is_paid, quote.id))
                 
                 quote_id = quote.id
                 
@@ -537,10 +549,10 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT q.id, q.number, q.client_id, q.typology, q.quote_date, q.intervention_date, 
-                       q.is_invoice, q.invoice_number, q.order_number, q.site_number, 
+                SELECT q.id, q.number, q.client_id, q.typology, q.quote_date, q.intervention_date,
+                       q.is_invoice, q.invoice_number, q.order_number, q.site_number,
                        q.site_address, q.is_invoiced, q.linked_invoice_id, q.created_at,
-                       c.name as client_name
+                       c.name as client_name, q.is_paid
                 FROM quotes q
                 LEFT JOIN clients c ON q.client_id = c.id
                 WHERE q.is_invoice = ?
@@ -585,7 +597,8 @@ class DatabaseManager:
                     site_address=row[10] or "",
                     is_invoiced=bool(row[11]) if row[11] is not None else False,
                     linked_invoice_id=row[12] if row[12] else None,
-                    created_at=created_at
+                    created_at=created_at,
+                    is_paid=bool(row[15]) if len(row) > 15 and row[15] is not None else False,
                 )
                 
                 # Get client info
@@ -717,6 +730,17 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('SELECT COUNT(*) FROM quotes WHERE client_id = ?', (client_id,))
             return cursor.fetchone()[0]
+
+    def set_invoice_paid(self, invoice_id: int, is_paid: bool) -> bool:
+        """Atomically toggle the paid status of an invoice. Returns True on success."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE quotes SET is_paid = ? WHERE id = ? AND is_invoice = 1',
+                (bool(is_paid), invoice_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def convert_quote_to_invoice(self, quote_id: int, order_number: str, intervention_date: datetime.date = None) -> str:
         """Convert a quote to an invoice by creating a new invoice entry and marking the original quote as invoiced"""
@@ -1474,6 +1498,7 @@ class MainApplication:
     INVOICES_COLUMN_TYPES = {
         'Numéro Facture': 'text', 'Bon de Commande': 'text', 'Client': 'text',
         'Date': 'date', 'Sites': 'text', 'Total HT': 'price', 'Total TTC': 'price',
+        'Payée': 'text',
     }
 
     def setup_quotes_tab(self):
@@ -1620,7 +1645,7 @@ class MainApplication:
         invoices_date_to.bind('<Return>', lambda event: self.apply_invoices_filter())
 
         # Treeview for invoices list
-        columns = ('Numéro Facture', 'Bon de Commande', 'Client', 'Date', 'Sites', 'Total HT', 'Total TTC')
+        columns = ('Numéro Facture', 'Bon de Commande', 'Client', 'Date', 'Sites', 'Total HT', 'Total TTC', 'Payée')
         self.invoices_tree = ttk.Treeview(list_frame, columns=columns, show='headings')
         self.invoices_sort_state = {'column': None, 'reverse': False}
 
@@ -1633,8 +1658,14 @@ class MainApplication:
             )
             if col == 'Sites':
                 self.invoices_tree.column(col, width=120)
+            elif col == 'Payée':
+                self.invoices_tree.column(col, width=90)
             else:
                 self.invoices_tree.column(col, width=150)
+
+        # Row styling: green for paid invoices, neutral for unpaid
+        self.invoices_tree.tag_configure('paid', background='#c8e6c9')
+        self.invoices_tree.tag_configure('unpaid', background='white')
 
         # Scrollbar
         scrollbar_invoices = ttk.Scrollbar(list_frame, orient='vertical', command=self.invoices_tree.yview)
@@ -1657,8 +1688,13 @@ class MainApplication:
         self.invoices_context_menu.add_command(label="Exporter PDF", command=self.export_invoice_pdf)
         self.invoices_context_menu.add_command(label="Exporter Word", command=self.export_invoice_word)
         self.invoices_context_menu.add_separator()
+        # Index 4 — label is updated dynamically in show_invoices_context_menu
+        # depending on the current paid status of the selected invoice.
+        self.invoices_context_menu.add_command(label="Marquer comme payée",
+                                               command=self.toggle_selected_invoice_paid)
+        self.invoices_context_menu.add_separator()
         self.invoices_context_menu.add_command(label="Supprimer", command=self.delete_selected_invoice)
-        
+
         self.invoices_tree.bind('<Button-3>', self.show_invoices_context_menu)
         
         # Load invoices
@@ -2073,6 +2109,8 @@ class MainApplication:
             else:
                 date_str = ""
 
+            paid_label = "✓ Payée" if invoice.is_paid else "Non payée"
+
             if search_text:
                 searchable_fields = [
                     invoice.invoice_number or "",
@@ -2082,6 +2120,7 @@ class MainApplication:
                     invoice.site_numbers_display or "",
                     f"{invoice.total_ht:.2f}",
                     f"{invoice.total_ttc:.2f}",
+                    paid_label,
                 ]
                 if not any(search_text in str(field).lower() for field in searchable_fields if field):
                     continue
@@ -2099,8 +2138,9 @@ class MainApplication:
                 date_str,
                 invoice.site_numbers_display,  # Show site numbers
                 f"{invoice.total_ht:.2f} €",
-                f"{invoice.total_ttc:.2f} €"
-            ), tags=(str(invoice.id),))
+                f"{invoice.total_ttc:.2f} €",
+                paid_label,
+            ), tags=(str(invoice.id), 'paid' if invoice.is_paid else 'unpaid'))
 
             total_ht += invoice.total_ht or 0.0
             total_ttc += invoice.total_ttc or 0.0
@@ -2596,11 +2636,54 @@ class MainApplication:
                 break
     
     def show_invoices_context_menu(self, event):
-        """Show context menu for invoices"""
+        """Show context menu for invoices.
+
+        The 'Marquer comme...' entry label is updated based on the paid status
+        of the row under the cursor so the action matches what the user sees.
+        """
+        # Identify the row under the cursor and select it (so the toggle
+        # operates on the row the user right-clicked, not the previous selection).
+        row_id = self.invoices_tree.identify_row(event.y)
+        if row_id:
+            self.invoices_tree.selection_set(row_id)
+            invoice = self._selected_invoice()
+            label = "Marquer comme non payée" if (invoice and invoice.is_paid) else "Marquer comme payée"
+        else:
+            label = "Marquer comme payée"
+        # Index 4 in setup matches our 'toggle paid' command.
+        try:
+            self.invoices_context_menu.entryconfigure(4, label=label)
+        except tk.TclError:
+            pass
         try:
             self.invoices_context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.invoices_context_menu.grab_release()
+
+    def _selected_invoice(self):
+        """Return the Quote object for the currently selected invoice, or None."""
+        selection = self.invoices_tree.selection()
+        if not selection:
+            return None
+        item = self.invoices_tree.item(selection[0])
+        try:
+            invoice_id = int(item['tags'][0])
+        except (ValueError, IndexError, TypeError):
+            return None
+        invoices = self.db.get_quotes(is_invoice=True)
+        return next((inv for inv in invoices if inv.id == invoice_id), None)
+
+    def toggle_selected_invoice_paid(self):
+        """Toggle the paid status of the selected invoice."""
+        invoice = self._selected_invoice()
+        if invoice is None:
+            messagebox.showinfo("Information", "Veuillez sélectionner une facture.")
+            return
+        new_status = not invoice.is_paid
+        if not self.db.set_invoice_paid(invoice.id, new_status):
+            messagebox.showerror("Erreur", "La mise à jour du statut de paiement a échoué.")
+            return
+        self.refresh_invoices_list()
     
     def run(self):
         """Run the application"""
