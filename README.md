@@ -168,7 +168,40 @@ pip install python-docx
 ```
 
 ### Base de données corrompue
-Supprimez le fichier `seeall_database.db` - il sera recréé au prochain lancement.
+1. Fermez l'application.
+2. Renommez/déplacez `seeall_database.db` (par sécurité).
+3. **Restaurez la dernière sauvegarde** : voir la section *Sauvegarde et restauration*.
+4. Si aucune sauvegarde n'est disponible, supprimer `seeall_database.db` recrée une base vide au prochain lancement (vous perdez les données).
+
+## 💾 Sauvegarde et restauration
+
+La base de données SQLite n'est **pas** suivie par git (elle contient des données et non du code). Un système de sauvegarde automatique est intégré à l'application.
+
+### Sauvegarde automatique
+À chaque démarrage de l'application, la base est copiée dans le dossier configuré sous `DATABASE_CONFIG['backup_folder']` (`config.py`). Le nom du fichier inclut la date et l'heure : `seeall_database_YYYYMMDD_HHMMSS.db`.
+
+Une **rotation FIFO** garde uniquement les `max_backups` plus récentes (10 par défaut) ; les plus anciennes sont supprimées automatiquement.
+
+### Sauvegarde manuelle
+Une barre d'état en bas de la fenêtre affiche la date de la dernière sauvegarde. Le bouton **« Sauvegarder maintenant »** force une sauvegarde immédiate (utile avant une opération risquée comme une suppression en masse).
+
+### Configuration (`config.py` → `DATABASE_CONFIG`)
+```python
+DATABASE_CONFIG = {
+    'database_filename': 'seeall_database.db',
+    'backup_on_startup': True,     # False = désactive la sauvegarde au démarrage
+    'backup_folder': r'G:\My Drive\seeall\seeall_backups_db',  # cloud-synced
+    'max_backups': 10,             # nombre de sauvegardes conservées
+}
+```
+**Recommandation** : pointer `backup_folder` vers un dossier synchronisé cloud (Google Drive, OneDrive, Dropbox) pour bénéficier d'une copie hors-machine sans effort.
+
+### Restaurer une sauvegarde
+1. Fermez l'application.
+2. Ouvrez votre dossier de sauvegardes.
+3. Identifiez le fichier à restaurer (ils sont triés chronologiquement par leur nom).
+4. Copiez ce fichier dans le dossier de l'application en le renommant `seeall_database.db` (écraser l'éventuel fichier existant — faites une copie de sécurité avant).
+5. Relancez l'application.
 
 ## 🔧 Développement
 
@@ -180,7 +213,6 @@ Supprimez le fichier `seeall_database.db` - il sera recréé au prochain lanceme
 - **Structure** : Classes orientées objet avec dataclasses
 
 ### Extensions Possibles
-- [ ] Sauvegarde automatique cloud
 - [ ] Templates de documents personnalisés
 - [ ] Gestion multi-utilisateurs
 - [ ] Statistiques et rapports
