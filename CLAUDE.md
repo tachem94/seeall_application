@@ -1,56 +1,45 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repo.
 
-## Running the Application
+## Run
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Launch the application
-python lancer_application.py
-# or directly
-python main_application.py
-
-# On Windows you can also double-click lancer_application.bat
+python lancer_application.py          # or main_application.py, or lancer_application.bat
+python -m pytest test_quote_number.py # only test file
 ```
+
+No build step. The app is a Tkinter desktop application; most logic lives in `main_application.py` (~3700 lines), with config split into `config.py`.
 
 ## Architecture
 
-This is a single-file Python desktop application (`main_application.py`) with a separate configuration file (`config.py`). There are no tests and no build step.
+`main_application.py` contains:
 
-### Key classes in `main_application.py`
+- **`DatabaseManager`** — SQLite wrapper (`seeall_database.db`). Schema migrations run inline at the bottom of `init_database()` via `ALTER TABLE … ADD COLUMN` guarded by try/except — add new migrations the same way.
+- **`BackupManager`** — copies the DB to `backups/` on startup and rotates old files. Runs **before** the DB connection is opened, so it operates on a closed file.
+- **`Client`**, **`Quote`**, **`SiteItem`**, **`QuoteItem`** — dataclasses. `QuoteItem` / `quote_items` table is legacy (kept for backward compat); `SiteItem` / `quote_sites` is the current model (one site per row: address, coords, description, price HT).
+- **`Quote`** — represents either a devis or a facture, distinguished by `is_invoice`. Conversion creates a new row linked via `linked_invoice_id`. Invoices also carry `is_paid` (drives the green-row highlight and the paid/unpaid totals on the Factures tab).
+- **`PDFGenerator`** (ReportLab), **`WordGenerator`** (python-docx), **`export_quotes_to_excel()`** (openpyxl, top-level). All three deps are optional — the app degrades gracefully when missing.
+- **`MainApplication`** — the Tk root with three tabs: Clients, Devis, Factures.
+- **`QuoteDialog`**, **`ConvertToInvoiceDialog`** — modal editors.
 
-- **`DatabaseManager`** — wraps SQLite (`seeall_database.db`), creates tables on init, handles all CRUD for clients, quotes, and sites. Schema migrations are applied inline in `init_database()`.
-- **`Client`**, **`Quote`**, **`SiteItem`**, **`QuoteItem`** — dataclasses representing the domain model. `QuoteItem` is deprecated; `SiteItem` is the current item type (one site = one row with address, coordinates, description, price HT).
-- **`Quote`** — can represent either a devis (quote) or facture (invoice) via `is_invoice` flag. Quotes and invoices share the same table; conversion creates a new row linked via `linked_invoice_id`.
-- The main Tkinter application class drives the UI with three tabs: Clients, Devis, Factures.
+## Numbering
 
-### Configuration (`config.py`)
-
-All company info, VAT rate, numbering prefixes, UI settings, and export settings live here as plain dicts (`COMPANY_CONFIG`, `BUSINESS_CONFIG`, `UI_CONFIG`, `EXPORT_CONFIG`, etc.). `main_application.py` imports these with a fallback to hardcoded defaults if the file is missing.
-
-### Numbering scheme
-
-- Quotes: `SA.<CLIENT>.<MMYYYY><seq>` (e.g. `SA.STAUBINSURMER.112025001`)
+- Quotes:   `SA.<CLIENT>.<MMYYYY><seq>` (e.g. `SA.STAUBINSURMER.112025001`)
 - Invoices: `FA.<CLIENT>.<MMYYYY><seq>`
-- Sequence counters are stored in the `counters` SQLite table, scoped per client + month.
+- Sequence counters live in the `counters` table, scoped per client + month.
 
-### Export
-
-PDF is generated with ReportLab; Word with python-docx. Both are optional — the app degrades gracefully if the libraries are absent. Export functions are methods on the main app class.
-
-### Database tables
+## Database tables
 
 | Table | Purpose |
 |---|---|
 | `clients` | Customer records |
 | `quotes` | Devis and factures (shared, distinguished by `is_invoice`) |
-| `quote_sites` | One-to-many sites per quote (current model) |
-| `quote_items` | Legacy items per quote (backward compat only) |
-| `counters` | Auto-increment counters for quote/invoice numbering |
+| `quote_sites` | Sites per quote — **current** item model |
+| `quote_items` | Legacy items — backward compat only, don't add features here |
+| `counters` | Per-client/month sequence counters |
 
-## Customisation
+## Config
 
-To change company details, VAT rate, bank info, or document prefixes — edit `config.py`. The README contains a full description of every config key.
+All company info, VAT rate, numbering prefixes, UI and export settings are plain dicts in `config.py` (`COMPANY_CONFIG`, `BUSINESS_CONFIG`, `UI_CONFIG`, `EXPORT_CONFIG`, …). `main_application.py` imports them with hardcoded fallbacks, so a missing `config.py` won't crash the app. See README for the full key reference.
